@@ -254,10 +254,22 @@ export class FileReceiver {
     this.cleanup();
   }
 
-  private async onChunk(ev: MessageEvent): Promise<void> {
+  /**
+   * Chunks arrive in order, but handling one is asynchronous — it writes to
+   * disk and feeds the hash. Letting two handlers overlap would let the
+   * second reach the hasher first and fail verification on a transfer that
+   * was actually perfect, so every chunk goes through one queue.
+   */
+  private writes: Promise<void> = Promise.resolve();
+
+  private onChunk(ev: MessageEvent): void {
+    const chunk = ev.data as ArrayBuffer;
+    this.writes = this.writes.then(() => this.writeChunk(chunk));
+  }
+
+  private async writeChunk(chunk: ArrayBuffer): Promise<void> {
     if (!this.sink || !this.hasher || !this.offer) return;
 
-    const chunk = ev.data as ArrayBuffer;
     const size = chunk.byteLength;
 
     // The sender is a stranger. Refuse more bytes than it said it would send
@@ -283,9 +295,13 @@ export class FileReceiver {
   }
 
   private async finish(expectedSha256: string): Promise<void> {
-    if (!this.sink || !this.hasher || !this.offer) return;
-
     this.emit("verifying");
+
+    // TRANSFER_COMPLETE can arrive while the last chunks are still being
+    // written, so let the queue drain before deciding the file is short.
+    await this.writes.catch(() => undefined);
+
+    if (!this.sink || !this.hasher || !this.offer) return;
 
     // A short file that claims completion is a failed transfer, not a
     // successful one.

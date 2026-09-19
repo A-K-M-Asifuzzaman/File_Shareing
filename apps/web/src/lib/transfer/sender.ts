@@ -289,6 +289,13 @@ export class FileSender {
 
       this.emit("verifying");
       const sha256 = await this.hasher.final();
+
+      // The last send() only queues bytes; control and data are separate SCTP
+      // streams, so TRANSFER_COMPLETE would overtake whatever is still sitting
+      // in the data channel's buffer and the receiver would see a short file.
+      // Wait for the buffer to drain before announcing completion.
+      await this.flush(data);
+
       sendControl(this.control!, { type: "TRANSFER_COMPLETE", fileId: offer.fileId, sha256 });
       this.emit("complete");
     } catch (err) {
@@ -303,6 +310,30 @@ export class FileSender {
       this.hasher?.destroy();
       this.hasher = null;
     }
+  }
+
+  /**
+   * Wait until every queued byte has actually left, not merely dropped below
+   * the low-water mark.
+   *
+   * ponytail: polls. `bufferedamountlow` does not re-fire once the threshold
+   * is already satisfied, and retuning the threshold mid-flight is fiddly for
+   * something that runs once per transfer.
+   */
+  private flush(data: RTCDataChannel): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const tick = () => {
+        if (data.bufferedAmount === 0) {
+          clearInterval(timer);
+          resolve();
+        } else if (data.readyState !== "open") {
+          clearInterval(timer);
+          reject(new Error("The connection dropped before the last bytes were sent."));
+        }
+      };
+      const timer = setInterval(tick, 50);
+      tick();
+    });
   }
 
   /** Wait for the send buffer to drain below the low-water mark. */
