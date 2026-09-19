@@ -8,11 +8,13 @@ import { ShareLink } from "@/components/Link";
 import {
   Endpoints,
   FileLine,
+  ForegroundHint,
   Notice,
   ProgressReadout,
   type LinkPhase,
 } from "@/components/Transfer";
 import { FileSender, type SenderSnapshot } from "@/lib/transfer/sender";
+import { useTransferGuards } from "@/lib/useTransferGuards";
 import { MAX_TRANSFER_BYTES, formatBytes } from "@/lib/transfer/protocol";
 
 const PHASE: Record<SenderSnapshot["state"], LinkPhase> = {
@@ -183,6 +185,9 @@ function Hero({
 /* -------------------------------------------------------------------------- */
 
 function SenderView({ snap, onReset }: { snap: SenderSnapshot; onReset: () => void }) {
+  const moving = snap.state === "transferring" || snap.state === "verifying";
+  useTransferGuards(moving);
+
   const finished =
     snap.state === "complete" || snap.state === "failed" || snap.state === "declined";
 
@@ -210,6 +215,8 @@ function SenderView({ snap, onReset }: { snap: SenderSnapshot; onReset: () => vo
               </Notice>
             </>
           )}
+
+        {moving && <ForegroundHint />}
 
         {(snap.state === "transferring" || snap.state === "verifying") && (
           <ProgressReadout

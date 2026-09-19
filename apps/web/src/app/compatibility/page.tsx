@@ -63,6 +63,28 @@ export default function CompatibilityPage() {
         </p>
       </Section>
 
+      <Section heading="Leaving the browser pauses it">
+        <p>
+          On a phone, switching to another app freezes the page, and the transfer stops until
+          you come back. It picks up where it left off rather than failing, but it makes no
+          progress while you are away. Leave the tab in front for the whole transfer.
+        </p>
+        <p>
+          This is not something we can code around. Mobile browsers suspend background pages
+          deliberately, and there is no web API that exempts a transfer from it — a background
+          worker does not survive it either. While a transfer is running we hold the screen
+          awake, so the display switching off will not interrupt it.
+        </p>
+        <p>
+          On desktop it is less strict: another tab in front, or the window minimised, is fine.
+          The machine going to sleep is not.
+        </p>
+        <p>
+          Running through a backgrounded app needs a native application rather than a web page,
+          which is what the mobile client is for.
+        </p>
+      </Section>
+
       <Section heading="Networks matter too">
         <p>
           A direct connection has to get through whatever sits between the two devices. Home

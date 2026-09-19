@@ -5,6 +5,7 @@ import Link from "next/link";
 import {
   Endpoints,
   FileLine,
+  ForegroundHint,
   Notice,
   Panel,
   PrimaryButton,
@@ -15,6 +16,7 @@ import {
 import { Field } from "@/components/Field";
 import { FileReceiver, type ReceiverSnapshot } from "@/lib/transfer/receiver";
 import { readTokenFromFragment } from "@/lib/transfer/signaling";
+import { useTransferGuards } from "@/lib/useTransferGuards";
 import { useClientValue } from "@/lib/useClientValue";
 
 const PHASE: Record<ReceiverSnapshot["state"], LinkPhase> = {
@@ -93,6 +95,8 @@ function ReceiverView({
   onDecline: () => void;
 }) {
   const { offer, capability } = snap;
+  const moving = snap.state === "receiving" || snap.state === "verifying";
+  useTransferGuards(moving);
 
   return (
     <Panel>
@@ -137,6 +141,8 @@ function ReceiverView({
             )}
           </>
         )}
+
+        {moving && <ForegroundHint />}
 
         {(snap.state === "receiving" || snap.state === "verifying") && (
           <ProgressReadout

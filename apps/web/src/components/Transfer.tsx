@@ -148,6 +148,27 @@ export function Notice({
   );
 }
 
+/**
+ * Shown only where it is actually true.
+ *
+ * Desktop browsers keep a transfer running in a background tab. Phones freeze
+ * the page the moment you leave the browser, and no web API exempts a WebRTC
+ * transfer from that — so the honest thing is to say so up front rather than
+ * let someone switch apps and come back to a stalled bar.
+ */
+export function ForegroundHint() {
+  const touch =
+    typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches;
+  if (!touch) return null;
+
+  return (
+    <p className="rounded-xl border border-line bg-panel-soft px-4 py-3.5 text-[13px] leading-relaxed text-ink-soft">
+      Keep this tab in front. Leaving the browser pauses the transfer until you come back —
+      the screen is being held awake in the meantime.
+    </p>
+  );
+}
+
 /** The frosted card everything sits on, over the field. */
 export function Panel({ children }: { children: React.ReactNode }) {
   return (
