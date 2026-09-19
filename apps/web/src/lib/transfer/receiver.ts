@@ -276,9 +276,43 @@ export class FileReceiver {
    */
   private writes: Promise<void> = Promise.resolve();
 
+  /**
+   * Bytes accepted off the wire but not yet written to disk.
+   *
+   * Disks are often slower than the connection, and nothing in WebRTC stops
+   * the sender on our behalf once we have taken a message off the channel.
+   * Without a limit this backlog is the whole difference between network and
+   * disk speed, held in memory — which is exactly what a 100 GB transfer
+   * cannot afford. Past the high mark we tell the sender to pause.
+   */
+  private pending = 0;
+  private paused = false;
+
+  private static readonly PENDING_HIGH = 8 * 1024 * 1024;
+  private static readonly PENDING_LOW = 2 * 1024 * 1024;
+
   private onChunk(ev: MessageEvent): void {
     const chunk = ev.data as ArrayBuffer;
-    this.writes = this.writes.then(() => this.writeChunk(chunk));
+    this.pending += chunk.byteLength;
+
+    if (!this.paused && this.pending >= FileReceiver.PENDING_HIGH && this.control && this.offer) {
+      this.paused = true;
+      sendControl(this.control, { type: "PAUSE", fileId: this.offer.fileId });
+    }
+
+    this.writes = this.writes.then(async () => {
+      await this.writeChunk(chunk);
+      this.pending -= chunk.byteLength;
+
+      if (this.paused && this.pending <= FileReceiver.PENDING_LOW && this.control && this.offer) {
+        this.paused = false;
+        sendControl(this.control, {
+          type: "RESUME",
+          fileId: this.offer.fileId,
+          fromOffset: this.received.toString(),
+        });
+      }
+    });
   }
 
   private async writeChunk(chunk: ArrayBuffer): Promise<void> {
@@ -356,6 +390,13 @@ export class FileReceiver {
 
     this.sink = null;
     this.verified = true;
+
+    // Tell the sender before tearing anything down, so it can stop showing
+    // "sending" while we were finishing the write.
+    if (this.control && this.offer) {
+      sendControl(this.control, { type: "TRANSFER_VERIFIED", fileId: this.offer.fileId });
+    }
+
     this.emit("complete");
     this.cleanup();
   }

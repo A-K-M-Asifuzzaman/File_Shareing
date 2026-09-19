@@ -139,7 +139,9 @@ function ReceiverView({
         {(snap.state === "receiving" || snap.state === "verifying") && (
           <ProgressReadout
             progress={snap.progress}
-            label={snap.state === "verifying" ? "Verifying…" : "Receiving"}
+            label={
+              snap.state === "verifying" ? "Saving to disk and verifying…" : "Receiving"
+            }
           />
         )}
 

@@ -62,6 +62,9 @@ export type ControlMessage =
   | { type: "RESUME"; fileId: string; fromOffset: string }
   | { type: "CHECKPOINT"; fileId: string; receivedBytes: string }
   | { type: "TRANSFER_COMPLETE"; fileId: string; sha256: string }
+  // Sent by the receiver once the file is written and its hash checked. The
+  // sender waits for this before telling anyone the transfer succeeded.
+  | { type: "TRANSFER_VERIFIED"; fileId: string }
   | { type: "TRANSFER_FAILED"; fileId: string; code: string; message: string };
 
 export interface FileOffer {

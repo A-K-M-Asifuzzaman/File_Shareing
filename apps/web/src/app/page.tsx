@@ -167,7 +167,11 @@ function SenderView({ snap, onReset }: { snap: SenderSnapshot; onReset: () => vo
         {(snap.state === "transferring" || snap.state === "verifying") && (
           <ProgressReadout
             progress={snap.progress}
-            label={snap.state === "verifying" ? "Verifying…" : "Sending"}
+            label={
+              snap.state === "verifying"
+                ? "Sent — waiting for them to finish saving…"
+                : "Sending"
+            }
           />
         )}
 

@@ -65,6 +65,10 @@ export class FileSender {
   /** True once both data channels are open and signaling stops mattering. */
   private linked = false;
 
+  /** Set while the receiver's write backlog is too deep for more data. */
+  private paused = false;
+  private resumeWaiters: (() => void)[] = [];
+
   constructor(
     private readonly file: File,
     private readonly onChange: (s: SenderSnapshot) => void,
@@ -247,6 +251,24 @@ export class FileSender {
       case "FILE_ACCEPT":
         await this.sendFile();
         break;
+
+      // The receiver's disk is often slower than the link. It tells us when
+      // its write backlog is too deep, so the backlog does not turn into
+      // memory on its side.
+      case "PAUSE":
+        this.paused = true;
+        break;
+
+      case "RESUME":
+        this.paused = false;
+        for (const wake of this.resumeWaiters.splice(0)) wake();
+        break;
+
+      // The transfer is only finished when the receiver has the file written
+      // and verified, not when we have pushed the last byte.
+      case "TRANSFER_VERIFIED":
+        this.emit("complete");
+        break;
       case "FILE_REJECT":
         this.emit("declined");
         this.cleanup();
@@ -284,6 +306,11 @@ export class FileSender {
         if (this.cancelled) return;
         if (data.readyState !== "open") throw new Error("The connection dropped mid-transfer.");
 
+        if (this.paused) {
+          await this.waitForResume();
+          continue;
+        }
+
         if (data.bufferedAmount > BUFFER_HIGH) {
           await this.drain(data);
           continue;
@@ -313,7 +340,11 @@ export class FileSender {
       await this.flush(data);
 
       sendControl(this.control!, { type: "TRANSFER_COMPLETE", fileId: offer.fileId, sha256 });
-      this.emit("complete");
+
+      // Stay in "verifying" until TRANSFER_VERIFIED arrives. The receiver may
+      // still be writing a long backlog to disk, and telling the user it is
+      // done while the other side is mid-write is how someone closes the tab
+      // and ends up with an unopenable file.
     } catch (err) {
       sendControl(this.control!, {
         type: "TRANSFER_FAILED",
@@ -358,6 +389,12 @@ export class FileSender {
       const timer = setInterval(tick, 250);
       tick();
     });
+  }
+
+  /** Block the read loop until the receiver says it has caught up. */
+  private waitForResume(): Promise<void> {
+    if (!this.paused) return Promise.resolve();
+    return new Promise((resolve) => this.resumeWaiters.push(resolve));
   }
 
   /** Wait for the send buffer to drain below the low-water mark. */
