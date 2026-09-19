@@ -28,6 +28,7 @@ uniform float u_progress;    // 0..1, fills the path between endpoints
 uniform vec2  u_pointer;     // -1..1, parallax
 uniform vec3  u_signal;
 uniform vec3  u_ink;
+uniform vec3  u_bg;
 uniform float u_dark;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -92,18 +93,27 @@ void main() {
   float ga = exp(-length(uv - a) * 13.0) * (0.55 + 0.45 * sin(t * 1.6));
   float gb = exp(-length(uv - b) * 13.0) * mix(0.25, 1.0, clamp(u_progress * 1.4, 0.0, 1.0));
 
-  vec3 col = u_signal * (acc * 0.75 + ga * 0.5 + gb * 0.6);
+  float energy = acc * 0.75 + ga * 0.5 + gb * 0.6;
+  float haze = fbm(uv * 2.2 + t * 0.015);
 
-  // A faint structural haze so the plate is never flat black.
-  col += u_ink * fbm(uv * 2.2 + t * 0.015) * mix(0.020, 0.045, u_dark);
+  // Composition has to flip with the theme. Adding light to black is what
+  // makes the dark plate glow; doing the same on paper just washes it out and
+  // buries the text, so in light mode the streams are laid *into* the ground
+  // as tint instead.
+  vec3 col;
+  if (u_dark > 0.5) {
+    col = u_bg + u_signal * energy + u_ink * haze * 0.045;
+    col *= 1.0 - dot(uv, uv) * 0.28;
+  } else {
+    col = mix(u_bg, u_signal, clamp(energy * 0.55, 0.0, 0.5));
+    col = mix(col, u_ink, haze * 0.035);
+    col *= 1.0 - dot(uv, uv) * 0.05;
+  }
 
   // Grain, to kill banding in the gradients.
-  col += (hash(gl_FragCoord.xy + fract(t)) - 0.5) * 0.02;
+  col += (hash(gl_FragCoord.xy + fract(t)) - 0.5) * 0.015;
 
-  // Vignette, stronger in dark mode.
-  col *= 1.0 - dot(uv, uv) * mix(0.10, 0.28, u_dark);
-
-  gl_FragColor = vec4(max(col, 0.0), 1.0);
+  gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
 `;
 
@@ -184,18 +194,21 @@ export function Field({
       pointer: gl.getUniformLocation(prog, "u_pointer"),
       signal: gl.getUniformLocation(prog, "u_signal"),
       ink: gl.getUniformLocation(prog, "u_ink"),
+      bg: gl.getUniformLocation(prog, "u_bg"),
       dark: gl.getUniformLocation(prog, "u_dark"),
     };
 
     const root = document.documentElement;
     let signal = cssRGB(root, "--signal");
     let ink = cssRGB(root, "--ink");
+    let bg = cssRGB(root, "--ground-deep");
     let dark = matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0;
 
     const scheme = matchMedia("(prefers-color-scheme: dark)");
     const onScheme = () => {
       signal = cssRGB(root, "--signal");
       ink = cssRGB(root, "--ink");
+      bg = cssRGB(root, "--ground-deep");
       dark = scheme.matches ? 1 : 0;
     };
     scheme.addEventListener("change", onScheme);
@@ -259,6 +272,7 @@ export function Field({
       gl.uniform2f(u.pointer, reduced ? 0 : pointer.x, reduced ? 0 : pointer.y);
       gl.uniform3f(u.signal, signal[0], signal[1], signal[2]);
       gl.uniform3f(u.ink, ink[0], ink[1], ink[2]);
+      gl.uniform3f(u.bg, bg[0], bg[1], bg[2]);
       gl.uniform1f(u.dark, dark);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     };
