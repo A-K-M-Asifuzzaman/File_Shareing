@@ -123,8 +123,12 @@ export class FileSender {
         onMessage: (msg) => void this.onSignal(msg),
         onClose: () => {
           // Once the data channel is up, signaling is no longer needed.
+          // Only reached once reconnection is exhausted.
           if (this.state === "waiting" || this.state === "connecting") {
-            this.fail("The transfer session expired before anyone connected.");
+            this.fail(
+              "Lost contact with the transfer service and could not get it back. " +
+                "The link is no longer valid — start a new transfer.",
+            );
           }
         },
       });
@@ -208,6 +212,7 @@ export class FileSender {
     await waitForOpen(control);
     await waitForOpen(data);
     this.linked = true;
+    this.signaling?.retireReconnect();
 
     // Real peer loss shows up here, not on the signaling socket.
     data.onclose = () => {

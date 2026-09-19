@@ -106,9 +106,20 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
     setState(() => _send = s);
 
-    // The foreground service is what keeps this running when the user leaves
-    // the app. It only exists while bytes are actually moving.
+    // The foreground service has to start the moment there is a link, not
+    // when bytes start moving: the very next thing the user does is leave for
+    // a messaging app to send that link, and without the service Android
+    // freezes us and the session dies before anyone can open it.
     switch (s.state) {
+      case TransferState.waiting:
+      case TransferState.connecting:
+      case TransferState.offering:
+        unawaited(
+          TransferService.start(
+            title: 'Ready to send ${s.fileName}',
+            body: 'Waiting for them to open the link. Keep this running.',
+          ),
+        );
       case TransferState.transferring:
       case TransferState.verifying:
         unawaited(
@@ -185,6 +196,14 @@ class _HomePageState extends State<HomePage> {
     setState(() => _receive = s);
 
     switch (s.state) {
+      case TransferState.waiting:
+      case TransferState.offered:
+        unawaited(
+          TransferService.start(
+            title: 'Incoming transfer',
+            body: 'Connected to the sender. Keep this running.',
+          ),
+        );
       case TransferState.transferring:
       case TransferState.verifying:
         unawaited(
@@ -495,8 +514,9 @@ class _SenderView extends StatelessWidget {
             else
               Notice(switch (snap.state) {
                 TransferState.waiting =>
-                  'Waiting for them to open the link. Keep this app running — '
-                      'the file is sent from this phone.',
+                  'Go and send the link — the transfer keeps running in the '
+                      'background while you are in another app. Just do not '
+                      'close this one: the file is sent from this phone.',
                 _ => 'Connected. Waiting for them to accept the file.',
               }),
           ],

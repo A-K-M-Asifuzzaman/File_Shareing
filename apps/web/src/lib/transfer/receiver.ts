@@ -169,6 +169,7 @@ export class FileReceiver {
         ev.channel.onmessage = (m) => this.onChunk(m);
         ev.channel.onopen = () => {
           this.linked = true;
+          this.signaling?.retireReconnect();
         };
         ev.channel.onclose = () => {
           // Real peer loss, as opposed to a dropped signaling socket.
@@ -176,7 +177,10 @@ export class FileReceiver {
             this.fail("The sender disconnected before the transfer finished.", "senderGone");
           }
         };
-        if (ev.channel.readyState === "open") this.linked = true;
+        if (ev.channel.readyState === "open") {
+          this.linked = true;
+          this.signaling?.retireReconnect();
+        }
       }
     };
 

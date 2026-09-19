@@ -201,29 +201,42 @@ func (s *Store) ReapLoop(every time.Duration, stop <-chan struct{}, onReap func(
 	}
 }
 
-// attach registers a connected peer, enforcing one connection per role and so
-// at most two peers per session.
-func (s *Store) attach(sess *Session, role Role, p *peer) error {
+// attach registers a connected peer for a role, replacing whatever was there.
+//
+// Reconnection is normal, not exceptional: a phone switching to a messaging
+// app to send the link, a laptop sleeping, a network hop. The old socket is
+// often still registered when the new one arrives, because a dropped TCP
+// connection takes a while to be noticed. Refusing the new connection in that
+// window strands the party who is trying to come back — and they hold the
+// capability for this role, so they are the same party by definition.
+//
+// Returns the evicted peer, if any, so the caller can close it out.
+func (s *Store) attach(sess *Session, role Role, p *peer) *peer {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	if _, taken := sess.peers[role]; taken {
-		return ErrRoleTaken
-	}
+
+	evicted := sess.peers[role]
 	sess.peers[role] = p
 	sess.expiresAt = s.now().Add(s.activeTTL)
-	return nil
+	return evicted
 }
 
-// detach removes a peer. It only removes the peer still registered under that
-// role, so a reconnect that already took the slot is not evicted by the old
-// connection's cleanup.
-func (s *Store) detach(sess *Session, role Role, p *peer) {
+// detach removes a peer and reports whether it was still the registered one.
+//
+// A reconnection replaces the entry, so the old connection's cleanup must not
+// remove its successor — nor announce a departure that did not happen. That
+// false departure is what made a reconnect look to the other side like the
+// peer giving up.
+func (s *Store) detach(sess *Session, role Role, p *peer) bool {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	if sess.peers[role] == p {
+
+	removed := sess.peers[role] == p
+	if removed {
 		delete(sess.peers, role)
 	}
 	sess.expiresAt = s.now().Add(s.idleTTL)
+	return removed
 }
 
 // touch extends an active session. Called on relayed traffic so a long

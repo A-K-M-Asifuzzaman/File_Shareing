@@ -120,11 +120,15 @@ class FileSender {
       await _signaling!.connect(
         onMessage: _onSignal,
         onClose: () {
-          // Meaningless once the peer connection exists.
+          // Only reached after reconnection has been exhausted, or once
+          // the peers are linked and signaling no longer matters.
           if (!_linked &&
               (_state == TransferState.waiting ||
                   _state == TransferState.connecting)) {
-            _fail('The transfer session expired before anyone connected.');
+            _fail(
+              'Lost contact with the transfer service and could not get it '
+              'back. The link is no longer valid — start a new transfer.',
+            );
           }
         },
       );
@@ -212,6 +216,7 @@ class FileSender {
       onTimeout: () => throw TimeoutException('data channel never opened'),
     );
     _linked = true;
+    _signaling?.retireReconnect();
 
     sendControl(_control, {
       'type': 'HELLO',

@@ -186,6 +186,7 @@ class FileReceiver {
         channel.onDataChannelState = (s) {
           if (s == RTCDataChannelState.RTCDataChannelOpen) {
             _linked = true;
+            _signaling?.retireReconnect();
           }
           if (s == RTCDataChannelState.RTCDataChannelClosed &&
               _state == TransferState.transferring) {
@@ -197,6 +198,7 @@ class FileReceiver {
         };
         if (channel.state == RTCDataChannelState.RTCDataChannelOpen) {
           _linked = true;
+          _signaling?.retireReconnect();
         }
       }
     };

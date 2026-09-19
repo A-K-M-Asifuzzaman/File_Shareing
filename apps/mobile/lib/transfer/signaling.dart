@@ -80,10 +80,17 @@ String buildShareUrl(String sessionId, String receiverToken) =>
 
 /// Thin WebSocket wrapper over the signaling service.
 ///
-/// Deliberately not reconnecting. Once the peer connection is up signaling is
-/// no longer needed, and callers must treat a dropped socket as meaningless
-/// after that point — proxies close idle sockets and no signaling traffic
-/// flows during a transfer.
+/// Reconnects while it still matters, and stops once it does not.
+///
+/// Before the two peers are linked, this socket is the only way they can find
+/// each other, and it drops for entirely ordinary reasons — switching to
+/// another app to paste the link, a network hop, an idle proxy. Giving up
+/// there would kill the transfer at exactly the moment the user is doing the
+/// one thing the flow requires of them. So it retries with backoff.
+///
+/// After the peer connection is up, signaling is dead weight: no traffic
+/// flows over it, proxies close it routinely, and a drop means nothing.
+/// Callers signal that with [retireReconnect].
 class SignalingChannel {
   final String sessionId;
   final Role role;
@@ -93,12 +100,37 @@ class SignalingChannel {
   StreamSubscription<dynamic>? _sub;
   bool _closed = false;
 
+  bool _reconnect = true;
+  int _attempt = 0;
+  Timer? _retry;
+
+  void Function(Map<String, dynamic>)? _onMessage;
+  void Function()? _onGiveUp;
+
+  /// Rejoining costs nothing on the server — a disconnect frees the role — and
+  /// on rejoin it tells us again whether the other peer is already waiting.
+  static const int _maxAttempts = 8;
+
   SignalingChannel(this.sessionId, this.role, this.token);
+
+  /// Stop trying to hold the socket open. Called once the data channel is up.
+  void retireReconnect() {
+    _reconnect = false;
+    _retry?.cancel();
+    _retry = null;
+  }
 
   Future<void> connect({
     required void Function(Map<String, dynamic> msg) onMessage,
     required void Function() onClose,
   }) async {
+    _onMessage = onMessage;
+    _onGiveUp = onClose;
+    await _open(first: true);
+  }
+
+  Future<void> _open({bool first = false}) async {
+    final onMessage = _onMessage!;
     final base = signalingUrl.replaceFirst(RegExp(r'^http'), 'ws');
     final uri = Uri.parse(
       '$base/ws?session=${Uri.encodeComponent(sessionId)}'
@@ -108,14 +140,27 @@ class SignalingChannel {
     final channel = WebSocketChannel.connect(uri);
     _channel = channel;
 
-    // Surfaces an auth rejection: the server refuses before the upgrade, so a
-    // bad capability fails here rather than opening and closing.
-    await channel.ready.timeout(
-      const Duration(seconds: 30),
-      onTimeout: () =>
-          throw Exception('The signaling service did not respond.'),
-    );
+    try {
+      // Surfaces an auth rejection: the server refuses before the upgrade, so
+      // a bad capability fails here rather than opening and closing.
+      await channel.ready.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () =>
+            throw Exception('The signaling service did not respond.'),
+      );
+    } catch (e) {
+      // The very first attempt reports failure to the caller, which is how a
+      // dead link or an expired session is told apart from a blip.
+      if (first) rethrow;
+      _scheduleRetry();
+      return;
+    }
 
+    // A successful connection resets the budget, so a long wait punctuated by
+    // brief drops does not slowly exhaust it.
+    _attempt = 0;
+
+    await _sub?.cancel();
     _sub = channel.stream.listen(
       (event) {
         try {
@@ -125,19 +170,42 @@ class SignalingChannel {
           // A malformed frame from our own service is not actionable here.
         }
       },
-      onDone: () {
-        if (!_closed) {
-          _closed = true;
-          onClose();
-        }
-      },
-      onError: (_) {
-        if (!_closed) {
-          _closed = true;
-          onClose();
-        }
-      },
+      onDone: _handleDrop,
+      onError: (_) => _handleDrop(),
     );
+  }
+
+  void _handleDrop() {
+    if (_closed) return;
+
+    // Still needed: the peers have not found each other yet.
+    if (_reconnect) {
+      _scheduleRetry();
+      return;
+    }
+
+    _closed = true;
+    _onGiveUp?.call();
+  }
+
+  void _scheduleRetry() {
+    if (_closed || !_reconnect) return;
+
+    if (_attempt >= _maxAttempts) {
+      _closed = true;
+      _onGiveUp?.call();
+      return;
+    }
+
+    // 1s, 2s, 4s… capped, so a phone that has been asleep for a while still
+    // tries often enough to be useful without hammering the service.
+    final delay = Duration(
+      milliseconds: (1000 * (1 << _attempt)).clamp(1000, 15000),
+    );
+    _attempt++;
+
+    _retry?.cancel();
+    _retry = Timer(delay, () => unawaited(_open()));
   }
 
   void send(Map<String, dynamic> msg) {
@@ -147,6 +215,9 @@ class SignalingChannel {
 
   Future<void> close() async {
     _closed = true;
+    _reconnect = false;
+    _retry?.cancel();
+    _retry = null;
     await _sub?.cancel();
     await _channel?.sink.close();
     _channel = null;

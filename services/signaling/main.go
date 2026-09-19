@@ -268,12 +268,14 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A reconnection replaces whatever held this role. The caller proved the
+	// capability, so it is the same party coming back — refusing it would
+	// strand them for as long as the dead socket lingers.
 	p := newPeer()
-	if err := s.store.attach(sess, role, p); err != nil {
-		writeErr(w, http.StatusConflict, "role_taken", "that role is already connected")
-		return
+	if evicted := s.store.attach(sess, role, p); evicted != nil {
+		s.log.Info("replacing a stale connection", "sessionId", sess.ID, "role", role)
+		evicted.close()
 	}
-	defer s.store.detach(sess, role, p)
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: s.cfg.originPatterns,
@@ -299,10 +301,19 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go s.writePump(ctx, conn, p)
 	s.readPump(ctx, conn, sess, role, p)
 
-	if other, ok := sess.peerFor(role); ok {
-		other.deliver(event("peer-left", string(role)))
+	// Only announce a departure if this connection was still the one holding
+	// the role. A reconnection replaces the entry, and the old socket's
+	// cleanup arriving afterwards must not tell the other side that a peer
+	// who is right there has left — that false alarm ended transfers that
+	// had already recovered.
+	if s.store.detach(sess, role, p) {
+		if other, ok := sess.peerFor(role); ok {
+			other.deliver(event("peer-left", string(role)))
+		}
+		s.log.Info("peer disconnected", "sessionId", sess.ID, "role", role)
+		return
 	}
-	s.log.Info("peer disconnected", "sessionId", sess.ID, "role", role)
+	s.log.Info("stale connection closed", "sessionId", sess.ID, "role", role)
 }
 
 func (s *server) writePump(ctx context.Context, conn *websocket.Conn, p *peer) {

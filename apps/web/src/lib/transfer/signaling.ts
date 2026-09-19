@@ -59,16 +59,29 @@ type Handlers = {
 };
 
 /**
- * Thin WebSocket wrapper. Deliberately not reconnecting: once the WebRTC
- * connection is up, signaling is no longer needed, and a dropped socket
- * before that means the transfer has failed in a way the user must see.
+ * Thin WebSocket wrapper that reconnects while it still matters.
  *
- * ponytail: no reconnect. Add one only if real sessions turn out to drop the
- * socket mid-negotiation often enough to matter.
+ * Until the two peers are linked, this socket is the only way they can find
+ * each other — and it drops for entirely ordinary reasons: switching apps to
+ * paste the link, a phone locking, a network hop, an idle proxy. Giving up
+ * there kills the transfer at exactly the moment the user is doing the one
+ * thing the flow asks of them, so it retries with backoff instead.
+ *
+ * Once the data channel is open, signaling is dead weight and a drop means
+ * nothing. Callers say so with retireReconnect().
  */
 export class SignalingChannel {
   private ws: WebSocket | null = null;
   private closed = false;
+
+  private reconnect = true;
+  private attempt = 0;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private handlers: Handlers | null = null;
+
+  /** Rejoining is cheap: a disconnect frees the role, and on rejoin the
+   *  server says again whether the other peer is already waiting. */
+  private static readonly MAX_ATTEMPTS = 8;
 
   constructor(
     private readonly sessionId: string,
@@ -76,7 +89,20 @@ export class SignalingChannel {
     private readonly token: string,
   ) {}
 
+  /** Stop holding the socket open; the peer connection has taken over. */
+  retireReconnect(): void {
+    this.reconnect = false;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+
   connect(handlers: Handlers): Promise<void> {
+    this.handlers = handlers;
+    return this.open(true);
+  }
+
+  private open(first: boolean): Promise<void> {
+    const handlers = this.handlers!;
     const base = SIGNALING_URL.replace(/^http/, "ws");
     const url =
       `${base}/ws?session=${encodeURIComponent(this.sessionId)}` +
@@ -86,7 +112,12 @@ export class SignalingChannel {
       const ws = new WebSocket(url);
       this.ws = ws;
 
-      ws.onopen = () => resolve();
+      ws.onopen = () => {
+        // A good connection resets the budget, so a long wait punctuated by
+        // brief drops does not slowly exhaust it.
+        this.attempt = 0;
+        resolve();
+      };
 
       ws.onmessage = (ev) => {
         try {
@@ -98,16 +129,49 @@ export class SignalingChannel {
       };
 
       // The server rejects a bad capability before the upgrade, so a failure
-      // here is an expired link far more often than a broken service.
-      ws.onerror = () => reject(new Error("Could not join the transfer session."));
+      // on the very first attempt is an expired link far more often than a
+      // blip — that one is reported rather than retried.
+      ws.onerror = () => {
+        if (first) reject(new Error("Could not join the transfer session."));
+      };
 
       ws.onclose = () => {
         if (this.closed) return;
+
+        if (this.reconnect && !first) {
+          this.scheduleRetry();
+          return;
+        }
+        if (this.reconnect && first) {
+          // Opened and then closed: treat as a blip and keep trying, but let
+          // the caller past the initial await.
+          resolve();
+          this.scheduleRetry();
+          return;
+        }
+
         this.closed = true;
         handlers.onClose("Signaling connection closed.");
-        reject(new Error("This link has expired or was already used."));
       };
     });
+  }
+
+  private scheduleRetry(): void {
+    if (this.closed || !this.reconnect) return;
+
+    if (this.attempt >= SignalingChannel.MAX_ATTEMPTS) {
+      this.closed = true;
+      this.handlers?.onClose("Signaling connection closed.");
+      return;
+    }
+
+    // 1s, 2s, 4s… capped, so a tab that was backgrounded for a while still
+    // retries often enough to be useful without hammering the service.
+    const delay = Math.min(1000 * 2 ** this.attempt, 15_000);
+    this.attempt++;
+
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => void this.open(false).catch(() => undefined), delay);
   }
 
   send(msg: SignalMessage): void {
@@ -116,6 +180,9 @@ export class SignalingChannel {
 
   close(): void {
     this.closed = true;
+    this.reconnect = false;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
     this.ws?.close();
     this.ws = null;
   }

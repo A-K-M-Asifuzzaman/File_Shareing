@@ -96,9 +96,7 @@ func TestActiveSessionSurvivesPastIdleTTL(t *testing.T) {
 	s, clock := newTestStore(t)
 	sess, tok, _, _ := s.Create()
 
-	if err := s.attach(sess, RoleSender, newPeer()); err != nil {
-		t.Fatalf("attach: %v", err)
-	}
+	s.attach(sess, RoleSender, newPeer())
 
 	// A big transfer runs far longer than the idle window. Traffic keeps it alive.
 	for range 5 {
@@ -112,39 +110,57 @@ func TestActiveSessionSurvivesPastIdleTTL(t *testing.T) {
 	}
 }
 
-func TestAtMostOnePeerPerRole(t *testing.T) {
+func TestReconnectReplacesTheStaleConnection(t *testing.T) {
 	s, _ := newTestStore(t)
 	sess, _, _, _ := s.Create()
 
-	first := newPeer()
-	if err := s.attach(sess, RoleSender, first); err != nil {
-		t.Fatalf("first attach: %v", err)
+	// A dropped socket is often still registered when its owner comes back —
+	// switching apps to send the link is enough to cause it. The returning
+	// party holds the capability, so they take the role over.
+	stale := newPeer()
+	if evicted := s.attach(sess, RoleSender, stale); evicted != nil {
+		t.Fatalf("nothing should have been evicted on the first attach")
 	}
-	if err := s.attach(sess, RoleSender, newPeer()); !errors.Is(err, ErrRoleTaken) {
-		t.Errorf("second sender allowed in, got %v", err)
+
+	fresh := newPeer()
+	evicted := s.attach(sess, RoleSender, fresh)
+	if evicted != stale {
+		t.Fatalf("reconnect did not evict the stale peer")
 	}
-	if err := s.attach(sess, RoleReceiver, newPeer()); err != nil {
-		t.Errorf("receiver blocked: %v", err)
+	if p := sess.peers[RoleSender]; p != fresh {
+		t.Error("the role is not held by the reconnected peer")
 	}
+
+	// Still one slot per role: a receiver is separate, and there are two.
+	s.attach(sess, RoleReceiver, newPeer())
 	if sess.peerCount() != 2 {
 		t.Errorf("peers = %d, want 2", sess.peerCount())
 	}
 }
 
-func TestDetachDoesNotEvictAReconnect(t *testing.T) {
+func TestStaleCleanupNeitherEvictsNorAnnouncesADeparture(t *testing.T) {
 	s, _ := newTestStore(t)
 	sess, _, _, _ := s.Create()
 
 	old := newPeer()
 	s.attach(sess, RoleSender, old)
-	s.detach(sess, RoleSender, old)
 
 	fresh := newPeer()
 	s.attach(sess, RoleSender, fresh)
-	s.detach(sess, RoleSender, old) // late cleanup from the dead connection
 
+	// The dead connection's handler finally exits. It must not remove its
+	// own replacement, and — the bug that ended recovered transfers — the
+	// caller must not use it to tell the other side the peer has left.
+	if removed := s.detach(sess, RoleSender, old); removed {
+		t.Error("stale detach reported a removal, which would announce a false departure")
+	}
 	if p, ok := sess.peers[RoleSender]; !ok || p != fresh {
 		t.Error("stale detach evicted the reconnected peer")
+	}
+
+	// The real one does report, so a genuine departure is still announced.
+	if removed := s.detach(sess, RoleSender, fresh); !removed {
+		t.Error("detaching the current peer should report a removal")
 	}
 }
 
