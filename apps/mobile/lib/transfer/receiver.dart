@@ -170,8 +170,10 @@ class FileReceiver {
     pc.onConnectionState = (s) {
       if (s == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
         _fail(
-          'Could not open a direct connection to the sender. One of the two '
-          'networks is blocking peer-to-peer traffic.',
+          'Could not open a direct connection to the sender. This is usually '
+          'mobile data or a restrictive Wi-Fi — the quickest thing to try is '
+          'putting both phones on the same Wi-Fi network. Getting through '
+          'anyway needs a relay server, which is not configured.',
         );
       }
     };

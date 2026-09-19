@@ -194,7 +194,10 @@ export class FileSender {
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "failed") {
         this.fail(
-          "Could not open a direct connection. One of the two networks is blocking peer-to-peer traffic.",
+          "Could not open a direct connection. This is usually mobile data or a " +
+            "restrictive Wi-Fi — the quickest thing to try is putting both devices on " +
+            "the same Wi-Fi network. Getting through anyway needs a relay server, " +
+            "which is not configured.",
         );
       }
     };
