@@ -20,3 +20,13 @@ build/
 !.env.example
 .vercel
 .env*.local
+
+# Flutter
+apps/mobile/build/
+apps/mobile/.dart_tool/
+apps/mobile/packages/*/.dart_tool/
+apps/mobile/.flutter-plugins-dependencies
+apps/mobile/*.iml
+apps/mobile/android/.gradle/
+apps/mobile/android/local.properties
+apps/mobile/flutter_*.log
