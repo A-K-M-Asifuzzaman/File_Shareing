@@ -50,18 +50,48 @@ backend. Not started.
 ## Layout
 
 ```
-apps/web/              web client
+apps/web/              Next.js client — UI and the transfer engine
+  src/lib/transfer/    framework-free protocol, chunking, hashing, sinks
 services/signaling/    Go signaling service
-protocol/              wire schemas, fixtures, version
-docs/                  architecture, protocol, security, deployment notes
+protocol/              wire protocol v1, the contract both clients implement
 ```
-
-## Status
-
-Early. Web client first — mobile work doesn't start until the web app can
-actually move a large file end to end and the docs are written.
 
 ## Running it
 
-Not wired up yet. Once the signaling service and web app land, this section gets
-the real commands.
+Two processes. The signaling service:
+
+```
+cd services/signaling
+go run .                      # :8080, override with SIGNALING_ADDR
+```
+
+The web client:
+
+```
+cd apps/web
+cp ../../.env.example .env.local   # point NEXT_PUBLIC_SIGNALING_URL at the service
+npm install
+npm run dev                        # :3000
+```
+
+Open two browsers, send a file from one, paste the link into the other.
+
+## Tests
+
+```
+cd services/signaling && go test -race ./...   # store, auth, TTL, relay
+cd services/signaling && node smoke.mjs        # end-to-end against a running service
+cd apps/web && npm test                        # protocol, sanitising, progress
+```
+
+`smoke.mjs` needs the service running; set `PORT` if it is not on 8080.
+
+## Status
+
+The signaling service and the web client are in. The transfer engine is
+complete — chunked reads, backpressure, streaming to disk, SHA-256
+verification — and the six pages are built.
+
+Not done yet: pause/resume across a dropped connection, and the Flutter client.
+Neither starts until the web app has been exercised against real transfers on
+real networks.

@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+/*
+  Identity: a transmission instrument, not a storage product.
+  Near-black ground, one signal colour, monospace for anything the machine
+  measured. Colour is reserved for live state — if something is lime, it is
+  happening right now.
+*/
+
+:root {
+  --ground: #f7f6f3;
+  --panel: #ffffff;
+  --line: #e2e0da;
+  --ink: #16171a;
+  --ink-soft: #5c5f66;
+  --ink-faint: #8b8e96;
+  /* Lime fails contrast on paper, so light mode uses a deep signal green. */
+  --signal: #2f6f2a;
+  --signal-ink: #ffffff;
+  --signal-wash: #eaf3e6;
+  --danger: #a8301c;
+  --danger-wash: #fbeceb;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #0b0c0e;
+    --panel: #131518;
+    --line: #262a2f;
+    --ink: #f1f2f0;
+    --ink-soft: #9aa0a6;
+    --ink-faint: #6b7178;
+    --signal: #c8f04c;
+    --signal-ink: #10130a;
+    --signal-wash: #1c2410;
+    --danger: #ff8a75;
+    --danger-wash: #2a1512;
+  }
+}
+
+@theme inline {
+  --color-ground: var(--ground);
+  --color-panel: var(--panel);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-ink-faint: var(--ink-faint);
+  --color-signal: var(--signal);
+  --color-signal-ink: var(--signal-ink);
+  --color-signal-wash: var(--signal-wash);
+  --color-danger: var(--danger);
+  --color-danger-wash: var(--danger-wash);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Anything the machine measured — sizes, rates, hashes, links — is monospace. */
+.tabular {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The connection line, drawn as a moving dash so direction is legible. */
+@keyframes flow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+.flowing {
+  animation: flow 0.9s linear infinite;
+}
+
+/* Waiting: the endpoint breathes rather than spins. Nothing is happening yet
+   and a spinner would imply otherwise. */
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.35);
+  }
+}
+.breathing {
+  animation: breathe 2.4s ease-in-out infinite;
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flowing,
+  .breathing {
+    animation: none;
+  }
+}
