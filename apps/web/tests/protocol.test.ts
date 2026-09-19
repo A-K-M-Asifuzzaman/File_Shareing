@@ -19,6 +19,7 @@ import {
   type ControlMessage,
 } from "../src/lib/transfer/protocol.ts";
 import { ProgressMeter } from "../src/lib/transfer/progress.ts";
+import { Backlog } from "../src/lib/transfer/backlog.ts";
 
 test("byte counts survive the round trip at 100 GB", () => {
   const offer = {
@@ -186,4 +187,56 @@ test("progress fraction is exact at the boundaries", () => {
   assert.equal(meter.snapshot().fraction, 0);
   meter.set(100n);
   assert.equal(meter.snapshot().fraction, 1);
+});
+
+/* -------------------------------------------------------------------------- */
+/* Receiver backpressure                                                      */
+/* -------------------------------------------------------------------------- */
+
+test("backlog pauses past the high mark and resumes under the low mark", () => {
+  const b = new Backlog(8_000_000, 2_000_000);
+
+  // 200 chunks of 64 KB is 13.1 MB, comfortably past the 8 MB high mark.
+  let paused = false;
+  let chunks = 0;
+  for (let i = 0; i < 200; i++) {
+    paused ||= b.arrived(65_536);
+    chunks++;
+    if (paused) break;
+  }
+  assert.ok(paused, "should have paused once the backlog passed 8 MB");
+  assert.ok(chunks * 65_536 >= 8_000_000, "paused no earlier than the high mark");
+  assert.ok(b.isPaused);
+
+  // Draining back under the low mark resumes exactly once.
+  let resumes = 0;
+  for (let i = 0; i < chunks; i++) if (b.written(65_536)) resumes++;
+  assert.equal(resumes, 1, "resume must fire once, not per chunk");
+  assert.equal(b.depth, 0);
+  assert.equal(b.isPaused, false);
+});
+
+test("backlog does not pause twice for one episode", () => {
+  const b = new Backlog(1000, 200);
+  assert.equal(b.arrived(1000), true, "first crossing pauses");
+  assert.equal(b.arrived(1000), false, "already paused, no second PAUSE");
+  assert.equal(b.written(1000), false, "still above the low mark");
+  assert.equal(b.written(1000), true, "back under the low mark, resume");
+});
+
+test("backlog measured with a detached buffer's length would wedge forever", () => {
+  // The bug this guards: hashing transfers the chunk to a worker, detaching
+  // it, after which byteLength reads 0. Decrementing by that never drains the
+  // backlog, so RESUME never fires and the transfer stalls at the high mark.
+  const b = new Backlog(1000, 200);
+  b.arrived(500);
+  assert.equal(b.arrived(500), true, "paused at the high mark");
+
+  for (let i = 0; i < 50; i++) b.written(0); // what a detached buffer reports
+  assert.equal(b.isPaused, true, "still stuck — this is the failure mode");
+  assert.equal(b.depth, 1000);
+
+  // Passing the size captured on arrival is what actually frees it.
+  b.written(500);
+  assert.equal(b.written(500), true, "resumes once real sizes are used");
 });

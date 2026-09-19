@@ -1,3 +1,4 @@
+import { Backlog } from "./backlog";
 import { createPeerConnection, sendControl } from "./connection";
 import { StreamHasher } from "./hasher";
 import {
@@ -276,36 +277,23 @@ export class FileReceiver {
    */
   private writes: Promise<void> = Promise.resolve();
 
-  /**
-   * Bytes accepted off the wire but not yet written to disk.
-   *
-   * Disks are often slower than the connection, and nothing in WebRTC stops
-   * the sender on our behalf once we have taken a message off the channel.
-   * Without a limit this backlog is the whole difference between network and
-   * disk speed, held in memory — which is exactly what a 100 GB transfer
-   * cannot afford. Past the high mark we tell the sender to pause.
-   */
-  private pending = 0;
-  private paused = false;
-
-  private static readonly PENDING_HIGH = 8 * 1024 * 1024;
-  private static readonly PENDING_LOW = 2 * 1024 * 1024;
+  /** Bytes taken off the wire but not yet on disk; see backlog.ts. */
+  private backlog = new Backlog(8 * 1024 * 1024, 2 * 1024 * 1024);
 
   private onChunk(ev: MessageEvent): void {
     const chunk = ev.data as ArrayBuffer;
-    this.pending += chunk.byteLength;
 
-    if (!this.paused && this.pending >= FileReceiver.PENDING_HIGH && this.control && this.offer) {
-      this.paused = true;
+    // Measure now: hashing transfers this buffer to the worker, which
+    // detaches it, and a detached buffer reports a length of zero.
+    const size = chunk.byteLength;
+
+    if (this.backlog.arrived(size) && this.control && this.offer) {
       sendControl(this.control, { type: "PAUSE", fileId: this.offer.fileId });
     }
 
     this.writes = this.writes.then(async () => {
       await this.writeChunk(chunk);
-      this.pending -= chunk.byteLength;
-
-      if (this.paused && this.pending <= FileReceiver.PENDING_LOW && this.control && this.offer) {
-        this.paused = false;
+      if (this.backlog.written(size) && this.control && this.offer) {
         sendControl(this.control, {
           type: "RESUME",
           fileId: this.offer.fileId,
