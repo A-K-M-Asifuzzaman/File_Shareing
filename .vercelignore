@@ -1,0 +1,9 @@
+# Vercel only builds apps/web, but the CLI uploads the repository root so the
+# project's root directory setting can resolve. Everything below is irrelevant
+# to that build, and apps/mobile alone is several gigabytes of Flutter and
+# Gradle output — uploading it turned a one-minute deploy into eight.
+apps/mobile
+services
+notes
+protocol
+*.apk
