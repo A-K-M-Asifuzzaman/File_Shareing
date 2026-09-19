@@ -23,6 +23,45 @@ export interface SessionCredentials {
  */
 export function warmUp(): void {
   void fetch(`${SIGNALING_URL}/healthz`, { cache: "no-store" }).catch(() => undefined);
+  void prefetchIce();
+}
+
+export interface IceConfig {
+  iceServers: RTCIceServer[];
+  relayAvailable: boolean;
+}
+
+/** STUN only. Used until the service answers, and if it never does. */
+const FALLBACK_ICE: IceConfig = {
+  iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
+  relayAvailable: false,
+};
+
+let iceCache: IceConfig = FALLBACK_ICE;
+let icePending: Promise<IceConfig> | null = null;
+
+/**
+ * Fetch ICE configuration from the signaling service.
+ *
+ * TURN credentials cannot live in the client: anything shipped to a browser
+ * is public, so a relay token in a NEXT_PUBLIC_ variable is a published
+ * token. The service mints short-lived credentials instead, and this asks for
+ * them early so they are in hand before a connection is negotiated.
+ */
+export function prefetchIce(): Promise<IceConfig> {
+  icePending ??= fetch(`${SIGNALING_URL}/api/ice`)
+    .then((r) => (r.ok ? r.json() : FALLBACK_ICE))
+    .then((cfg: IceConfig) => {
+      if (Array.isArray(cfg?.iceServers) && cfg.iceServers.length > 0) iceCache = cfg;
+      return iceCache;
+    })
+    .catch(() => FALLBACK_ICE);
+  return icePending;
+}
+
+/** The configuration fetched so far; STUN-only until the service replies. */
+export function currentIce(): IceConfig {
+  return iceCache;
 }
 
 /** Mint a session. Only the sender does this; the receiver arrives with a link. */

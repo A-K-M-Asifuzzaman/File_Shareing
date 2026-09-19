@@ -48,7 +48,49 @@ void warmUp() {
         .timeout(const Duration(seconds: 60))
         .then((_) {}, onError: (_) {}),
   );
+  unawaited(prefetchIce());
 }
+
+/// ICE configuration, as the signaling service reports it.
+class IceConfig {
+  final List<Map<String, dynamic>> servers;
+  final bool relayAvailable;
+  const IceConfig(this.servers, this.relayAvailable);
+}
+
+const IceConfig _fallbackIce = IceConfig([
+  {
+    'urls': ['stun:stun.l.google.com:19302'],
+  },
+], false);
+
+IceConfig _ice = _fallbackIce;
+Future<IceConfig>? _icePending;
+
+/// Ask the service for ICE servers.
+///
+/// TURN credentials cannot be shipped inside the app — an APK is readable —
+/// so the service mints short-lived ones. Fetched early so they are in hand
+/// before a connection is negotiated.
+Future<IceConfig> prefetchIce() {
+  _icePending ??= http
+      .get(Uri.parse('$signalingUrl/api/ice'))
+      .timeout(const Duration(seconds: 30))
+      .then((res) {
+        if (res.statusCode != 200) return _fallbackIce;
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        final servers = (body['iceServers'] as List<dynamic>? ?? [])
+            .cast<Map<String, dynamic>>();
+        if (servers.isEmpty) return _fallbackIce;
+        _ice = IceConfig(servers, body['relayAvailable'] == true);
+        return _ice;
+      })
+      .catchError((_) => _fallbackIce);
+  return _icePending!;
+}
+
+/// What has been fetched so far; STUN-only until the service replies.
+IceConfig currentIce() => _ice;
 
 /// Mint a session. Only the sender does this; the receiver arrives with a link.
 Future<SessionCredentials> createSession() async {

@@ -96,6 +96,7 @@ type server struct {
 	store   *Store
 	log     *slog.Logger
 	limiter *rateLimiter
+	ice     *iceProvider
 }
 
 func main() {
@@ -107,7 +108,9 @@ func main() {
 		store:   NewStore(cfg.idleTTL, cfg.activeTTL),
 		log:     log,
 		limiter: newRateLimiter(cfg.createPerMin, time.Minute),
+		ice:     newICEProvider(),
 	}
+	log.Info("ice configuration", "relay", srv.ice.configured())
 
 	stop := make(chan struct{})
 	go srv.store.ReapLoop(cfg.reapEvery, stop, func(n int) {
@@ -116,6 +119,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/sessions", srv.handleCreateSession)
+	mux.HandleFunc("GET /api/ice", srv.handleICE)
 	mux.HandleFunc("GET /ws", srv.handleWS)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

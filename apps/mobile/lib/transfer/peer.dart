@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import 'signaling.dart';
+
 /// Shared WebRTC plumbing for both directions.
 ///
 /// Everything here mirrors apps/web/src/lib/transfer/connection.ts, including
@@ -11,32 +13,12 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 /// buffered until a remote description exists, and `peer-left` is ignored
 /// once the data channel is open.
 
-Map<String, dynamic> iceConfiguration() {
-  const stun = String.fromEnvironment(
-    'STUN_URLS',
-    defaultValue: 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302',
-  );
-  const turnUrl = String.fromEnvironment('TURN_URL');
-
-  final servers = <Map<String, dynamic>>[];
-  final urls = stun
-      .split(',')
-      .map((s) => s.trim())
-      .where((s) => s.isNotEmpty)
-      .toList();
-  if (urls.isNotEmpty) servers.add({'urls': urls});
-
-  // TURN relays file bytes through a third party, so it is opt-in.
-  if (turnUrl.isNotEmpty) {
-    servers.add({
-      'urls': turnUrl,
-      'username': const String.fromEnvironment('TURN_USERNAME'),
-      'credential': const String.fromEnvironment('TURN_CREDENTIAL'),
-    });
-  }
-
-  return {'iceServers': servers, 'sdpSemantics': 'unified-plan'};
-}
+/// ICE servers for a new connection, as reported by the signaling service —
+/// the only place TURN credentials can safely be minted.
+Map<String, dynamic> iceConfiguration() => {
+  'iceServers': currentIce().servers,
+  'sdpSemantics': 'unified-plan',
+};
 
 /// Holds candidates that arrive before the remote description is set.
 ///
