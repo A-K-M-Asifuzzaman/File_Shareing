@@ -11,6 +11,7 @@ import {
   PrimaryButton,
   ProgressReadout,
   QuietButton,
+  Working,
   type LinkPhase,
 } from "@/components/Transfer";
 import { Field } from "@/components/Field";
@@ -76,6 +77,9 @@ export default function ReceivePage({ params }: PageProps<"/t/[session]">) {
       ) : !snap ? (
         <Panel>
           <Endpoints phase="waiting" from="Them" to="This device" />
+          <div className="mt-6">
+            <Working label="Opening the transfer…" />
+          </div>
         </Panel>
       ) : (
         <ReceiverView snap={snap} onAccept={() => receiverRef.current?.accept()} onDecline={() => receiverRef.current?.decline()} />
@@ -112,7 +116,10 @@ function ReceiverView({
 
       <div className="mt-7 flex flex-col gap-5">
         {(snap.state === "connecting" || snap.state === "waiting") && (
-          <Notice>Connecting to the sender&hellip;</Notice>
+          <Working
+            label="Connecting to the sender…"
+            patience="Taking a while. The transfer service may be waking up, or the sender may have closed their tab."
+          />
         )}
 
         {snap.state === "offered" && offer && (

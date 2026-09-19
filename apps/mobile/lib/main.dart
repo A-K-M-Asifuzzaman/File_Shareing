@@ -14,6 +14,7 @@ import 'transfer/peer.dart';
 
 import 'transfer/receiver.dart';
 import 'transfer/sender.dart';
+import 'transfer/signaling.dart';
 import 'widgets.dart';
 
 void main() {
@@ -50,10 +51,18 @@ class _HomePageState extends State<HomePage> {
 
   final _linkController = TextEditingController();
 
+  /// Android may copy the chosen file out of shared storage before handing it
+  /// over, which for a large video takes real time and shows nothing.
+  bool _picking = false;
+
   @override
   void initState() {
     super.initState();
     unawaited(TransferService.requestPermissions());
+
+    // Start waking the signaling service now, so its cold start overlaps with
+    // choosing a file rather than landing on the user afterwards.
+    warmUp();
   }
 
   @override
@@ -68,8 +77,15 @@ class _HomePageState extends State<HomePage> {
   /* ---------------------------------------------------------------- send */
 
   Future<void> _pickAndSend() async {
-    // v13 returns a list and no longer exposes a platform instance.
-    final picked = await FilePicker.pickFiles();
+    setState(() => _picking = true);
+
+    List<PlatformFile> picked;
+    try {
+      // v13 returns a list and no longer exposes a platform instance.
+      picked = await FilePicker.pickFiles();
+    } finally {
+      if (mounted) setState(() => _picking = false);
+    }
     if (picked.isEmpty || picked.first.path == null) return;
 
     final chosen = picked.first;
@@ -194,8 +210,10 @@ class _HomePageState extends State<HomePage> {
 
   void _copyLink(String url) {
     unawaited(Clipboard.setData(ClipboardData(text: url)));
-    _toast('Link copied. Send it however you like — the whole thing, including '
-        'the part after the #.');
+    _toast(
+      'Link copied. Send it however you like — the whole thing, including '
+      'the part after the #.',
+    );
   }
 
   void _toast(String message) {
@@ -298,10 +316,18 @@ class _HomePageState extends State<HomePage> {
             children: [
               const Endpoints(from: 'This phone', to: 'Them'),
               const SizedBox(height: 22),
-              FilledButton(
-                onPressed: _pickAndSend,
-                child: const Text('Choose a file'),
-              ),
+              if (_picking)
+                const Working(
+                  label: 'Opening the file…',
+                  patience:
+                      'Android copies large files out of shared storage before '
+                      'handing them over, which can take a while for a video.',
+                )
+              else
+                FilledButton(
+                  onPressed: _pickAndSend,
+                  child: const Text('Choose a file'),
+                ),
               const SizedBox(height: 10),
               Text(
                 'up to ${formatBytes(maxTransferBytes)}',
@@ -421,7 +447,13 @@ class _SenderView extends StatelessWidget {
           const SizedBox(height: 22),
 
           if (snap.state == TransferState.creating)
-            const Notice('Creating a transfer session…'),
+            const Working(
+              label: 'Creating a transfer session…',
+              patience:
+                  'Taking longer than usual — the transfer service sleeps when '
+                  'unused and is waking up. This only happens on the first '
+                  'transfer after a quiet spell.',
+            ),
 
           if (snap.shareUrl != null &&
               (snap.state == TransferState.waiting ||
@@ -452,14 +484,21 @@ class _SenderView extends StatelessWidget {
               child: const Text('Copy the link'),
             ),
             const SizedBox(height: 14),
-            Notice(switch (snap.state) {
-              TransferState.waiting =>
-                'Waiting for them to open the link. Keep this app running — the file '
-                    'is sent from this phone.',
-              TransferState.connecting =>
-                'They opened the link. Making a direct connection…',
-              _ => 'Connected. Waiting for them to accept the file.',
-            }),
+            if (snap.state == TransferState.connecting)
+              const Working(
+                label: 'They opened the link. Making a direct connection…',
+                patience:
+                    'Still trying. Some networks block direct connections '
+                    'between devices — if it does not settle, one of you may '
+                    'need a different network.',
+              )
+            else
+              Notice(switch (snap.state) {
+                TransferState.waiting =>
+                  'Waiting for them to open the link. Keep this app running — '
+                      'the file is sent from this phone.',
+                _ => 'Connected. Waiting for them to accept the file.',
+              }),
           ],
 
           if (moving) ...[
@@ -545,7 +584,12 @@ class _ReceiverView extends StatelessWidget {
 
           if (snap.state == TransferState.connecting ||
               snap.state == TransferState.waiting)
-            const Notice('Connecting to the sender…'),
+            const Working(
+              label: 'Connecting to the sender…',
+              patience:
+                  'Taking a while. The transfer service may be waking up, or '
+                  'the sender may have closed their app.',
+            ),
 
           if (snap.state == TransferState.offered && offer != null) ...[
             const Notice(

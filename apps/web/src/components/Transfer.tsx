@@ -169,6 +169,31 @@ export function ForegroundHint() {
   );
 }
 
+/**
+ * Waiting on something with no measurable progress.
+ *
+ * A line of static text is indistinguishable from a frozen page, and this
+ * particular wait can run to most of a minute when the signaling service has
+ * to wake up. So: something visibly moving, and an explanation that surfaces
+ * itself only once the wait has gone on long enough to worry about — on a CSS
+ * delay, so no timer has to be managed to say it.
+ */
+export function Working({ label, patience }: { label: string; patience?: string }) {
+  return (
+    <div
+      className="flex flex-col gap-3 rounded-xl border border-line bg-panel-soft px-4 py-3.5"
+      role="status"
+      aria-live="polite"
+    >
+      <p className="text-[13px] text-ink-soft">{label}</p>
+      <div className="indeterminate h-1 w-full rounded-full bg-line" />
+      {patience && (
+        <p className="later text-[12px] leading-relaxed text-ink-faint">{patience}</p>
+      )}
+    </div>
+  );
+}
+
 /** The frosted card everything sits on, over the field. */
 export function Panel({ children }: { children: React.ReactNode }) {
   return (

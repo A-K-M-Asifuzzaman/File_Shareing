@@ -11,6 +11,20 @@ export interface SessionCredentials {
   expiresInSeconds: number;
 }
 
+/**
+ * Poke the signaling service so it is awake before anyone needs it.
+ *
+ * The service sleeps when idle, and the first request after that pays the
+ * whole cold start — up to about a minute. Waking it when the page loads
+ * moves that wait into the time someone spends reading the page and choosing
+ * a file, instead of into a spinner after they have committed.
+ *
+ * Deliberately fire-and-forget: if it fails, createSession reports it later.
+ */
+export function warmUp(): void {
+  void fetch(`${SIGNALING_URL}/healthz`, { cache: "no-store" }).catch(() => undefined);
+}
+
 /** Mint a session. Only the sender does this; the receiver arrives with a link. */
 export async function createSession(): Promise<SessionCredentials> {
   const res = await fetch(`${SIGNALING_URL}/api/sessions`, { method: "POST" });

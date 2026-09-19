@@ -33,6 +33,23 @@ class SessionCredentials {
   });
 }
 
+/// Poke the signaling service so it is awake before anyone needs it.
+///
+/// The service sleeps when idle and the first request after that pays the
+/// whole cold start — up to about a minute. Waking it as the app opens moves
+/// that wait into the time someone spends choosing a file, rather than into a
+/// spinner after they have committed.
+///
+/// Fire and forget: if it fails, createSession reports it properly later.
+void warmUp() {
+  unawaited(
+    http
+        .get(Uri.parse('$signalingUrl/healthz'))
+        .timeout(const Duration(seconds: 60))
+        .then((_) {}, onError: (_) {}),
+  );
+}
+
 /// Mint a session. Only the sender does this; the receiver arrives with a link.
 Future<SessionCredentials> createSession() async {
   final res = await http

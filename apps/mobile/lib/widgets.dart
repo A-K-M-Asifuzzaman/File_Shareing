@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:direct_protocol/direct_protocol.dart';
 import 'package:flutter/material.dart';
 
@@ -313,4 +315,95 @@ class FileLine extends StatelessWidget {
       const Divider(height: 1, color: Palette.line),
     ],
   );
+}
+
+/// Waiting on something with no measurable progress.
+///
+/// A static line of text is indistinguishable from a frozen screen, and two
+/// of these waits — waking the signaling service, and the system copying a
+/// large file out of shared storage — can run to tens of seconds. So:
+/// something visibly moving, plus an explanation that appears only once the
+/// wait has gone on long enough to be worrying.
+class Working extends StatefulWidget {
+  final String label;
+  final String? patience;
+
+  const Working({super.key, required this.label, this.patience});
+
+  @override
+  State<Working> createState() => _WorkingState();
+}
+
+class _WorkingState extends State<Working> {
+  bool _slow = false;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.patience != null) {
+      _timer = Timer(const Duration(seconds: 4), () {
+        if (mounted) setState(() => _slow = true);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: Palette.panelSoft,
+        border: Border.all(color: Palette.line),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            widget.label,
+            style: const TextStyle(
+              fontSize: 13.5,
+              height: 1.5,
+              color: Palette.inkSoft,
+            ),
+          ),
+          const SizedBox(height: 12),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: const LinearProgressIndicator(
+              minHeight: 4,
+              backgroundColor: Palette.line,
+              valueColor: AlwaysStoppedAnimation(Palette.signal),
+            ),
+          ),
+          AnimatedCrossFade(
+            duration: const Duration(milliseconds: 350),
+            crossFadeState: _slow
+                ? CrossFadeState.showSecond
+                : CrossFadeState.showFirst,
+            firstChild: const SizedBox(width: double.infinity),
+            secondChild: Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(
+                widget.patience ?? '',
+                style: const TextStyle(
+                  fontSize: 12,
+                  height: 1.5,
+                  color: Palette.inkFaint,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

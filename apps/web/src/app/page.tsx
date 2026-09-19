@@ -11,11 +11,13 @@ import {
   ForegroundHint,
   Notice,
   ProgressReadout,
+  Working,
   type LinkPhase,
 } from "@/components/Transfer";
 import { FileSender, type SenderSnapshot } from "@/lib/transfer/sender";
 import { useTransferGuards } from "@/lib/useTransferGuards";
 import { MAX_TRANSFER_BYTES, formatBytes } from "@/lib/transfer/protocol";
+import { warmUp } from "@/lib/transfer/signaling";
 
 const PHASE: Record<SenderSnapshot["state"], LinkPhase> = {
   idle: "idle",
@@ -39,6 +41,10 @@ export default function SendPage() {
   // A transfer only exists while this tab is open; make that concrete by
   // tearing the session down when the page goes away.
   useEffect(() => () => senderRef.current?.cancel(), []);
+
+  // Start waking the signaling service now rather than when someone commits
+  // to a file — the cold start then happens while they are still choosing.
+  useEffect(() => warmUp(), []);
 
   const begin = useCallback(async (picked: File) => {
     setFile(picked);
@@ -200,19 +206,29 @@ function SenderView({ snap, onReset }: { snap: SenderSnapshot; onReset: () => vo
       </div>
 
       <div className="mt-7 flex flex-col gap-5">
-        {snap.state === "creating" && <Notice>Creating a transfer session&hellip;</Notice>}
+        {snap.state === "creating" && (
+          <Working
+            label="Creating a transfer session…"
+            patience="Taking longer than usual — the transfer service sleeps when unused and is waking up. This only happens on the first transfer after a quiet spell."
+          />
+        )}
 
         {(snap.state === "waiting" || snap.state === "connecting" || snap.state === "offering") &&
           snap.shareUrl && (
             <>
               <ShareLink url={snap.shareUrl} />
-              <Notice>
-                {snap.state === "waiting"
-                  ? "Waiting for them to open the link. Keep this tab open — the file is sent from this device."
-                  : snap.state === "connecting"
-                    ? "They opened the link. Making a direct connection…"
+              {snap.state === "connecting" ? (
+                <Working
+                  label="They opened the link. Making a direct connection…"
+                  patience="Still trying. Some networks block direct connections between devices — if it does not settle, one of you may need a different network."
+                />
+              ) : (
+                <Notice>
+                  {snap.state === "waiting"
+                    ? "Waiting for them to open the link. Keep this tab open — the file is sent from this device."
                     : "Connected. Waiting for them to accept the file."}
-              </Notice>
+                </Notice>
+              )}
             </>
           )}
 
