@@ -46,7 +46,7 @@ type iceProvider struct {
 	cfTTL      time.Duration
 
 	mu     sync.Mutex
-	cached *iceServer
+	cached []iceServer
 	expiry time.Time
 
 	client *http.Client
@@ -89,23 +89,34 @@ func (p *iceProvider) servers(ctx context.Context) iceResponse {
 	}
 
 	turn, err := p.turn(ctx)
-	if err != nil || turn == nil {
+	if err != nil || len(turn) == 0 {
 		return res
 	}
 
-	res.IceServers = append(res.IceServers, *turn)
-	res.RelayAvailable = true
+	res.IceServers = append(res.IceServers, turn...)
+
+	// Only claim a relay when one is actually present. The provider returns
+	// its STUN endpoint alongside the relay, and a STUN entry says nothing
+	// about getting through carrier NAT — claiming otherwise would make the
+	// failure message lie about what is configured.
+	for _, s := range turn {
+		for _, u := range s.URLs {
+			if strings.HasPrefix(u, "turn:") || strings.HasPrefix(u, "turns:") {
+				res.RelayAvailable = true
+			}
+		}
+	}
 	return res
 }
 
 // turn mints credentials, reusing them until they are close to expiring.
 // Every transfer asking Cloudflare for its own credential would be pointless
 // traffic and pointless rate-limit pressure.
-func (p *iceProvider) turn(ctx context.Context) (*iceServer, error) {
+func (p *iceProvider) turn(ctx context.Context) ([]iceServer, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.cached != nil && time.Now().Before(p.expiry) {
+	if len(p.cached) > 0 && time.Now().Before(p.expiry) {
 		return p.cached, nil
 	}
 
@@ -136,21 +147,30 @@ func (p *iceProvider) turn(ctx context.Context) (*iceServer, error) {
 		return nil, err
 	}
 
-	// Cloudflare has returned both an object and an array here depending on
-	// the endpoint; accept either rather than break on the shape.
-	var one iceServer
-	if err := json.Unmarshal(parsed.IceServers, &one); err != nil {
-		var many []iceServer
-		if err := json.Unmarshal(parsed.IceServers, &many); err != nil || len(many) == 0 {
+	// The provider returns an array — its STUN endpoint and the credentialed
+	// relay entries — though the documented example shows a single object.
+	// Accept either shape, and keep every entry: taking only the first got
+	// us the STUN endpoint and no relay at all.
+	var many []iceServer
+	if err := json.Unmarshal(parsed.IceServers, &many); err != nil {
+		var one iceServer
+		if err := json.Unmarshal(parsed.IceServers, &one); err != nil {
 			return nil, fmt.Errorf("turn credentials: unexpected shape")
 		}
-		one = many[0]
+		many = []iceServer{one}
 	}
-	if len(one.URLs) == 0 {
+
+	kept := make([]iceServer, 0, len(many))
+	for _, s := range many {
+		if len(s.URLs) > 0 {
+			kept = append(kept, s)
+		}
+	}
+	if len(kept) == 0 {
 		return nil, fmt.Errorf("turn credentials: no urls")
 	}
 
-	p.cached = &one
+	p.cached = kept
 	// Refresh well before expiry so an in-flight transfer never watches its
 	// credentials lapse underneath it.
 	p.expiry = time.Now().Add(p.cfTTL - p.cfTTL/4)
