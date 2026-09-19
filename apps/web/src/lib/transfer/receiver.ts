@@ -48,6 +48,9 @@ export class FileReceiver {
   private verified = false;
   private received = 0n;
 
+  /** True once the data channel is open and signaling stops mattering. */
+  private linked = false;
+
   private addCandidate: ((c: RTCIceCandidateInit) => void) | null = null;
   private remoteReady: (() => Promise<void>) | null = null;
 
@@ -123,9 +126,10 @@ export class FileReceiver {
           this.queueCandidate(msg.candidate);
           break;
         case "peer-left":
-          if (this.state === "receiving") {
-            this.fail("The sender disconnected before the transfer finished.", "senderGone");
-          } else if (this.state !== "complete") {
+          // See the note in sender.ts: after the peer connection is up, the
+          // signaling socket goes idle and its closing means nothing. The
+          // data channel reports real loss.
+          if (!this.linked && this.state !== "complete") {
             this.fail("The sender is no longer online.", "senderGone");
           }
           break;
@@ -161,7 +165,17 @@ export class FileReceiver {
         this.control.onmessage = (m) => void this.onControl(m);
       } else if (ev.channel.label === "data") {
         ev.channel.binaryType = "arraybuffer";
-        ev.channel.onmessage = (m) => void this.onChunk(m);
+        ev.channel.onmessage = (m) => this.onChunk(m);
+        ev.channel.onopen = () => {
+          this.linked = true;
+        };
+        ev.channel.onclose = () => {
+          // Real peer loss, as opposed to a dropped signaling socket.
+          if (this.state === "receiving") {
+            this.fail("The sender disconnected before the transfer finished.", "senderGone");
+          }
+        };
+        if (ev.channel.readyState === "open") this.linked = true;
       }
     };
 

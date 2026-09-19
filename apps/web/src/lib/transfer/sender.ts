@@ -62,6 +62,9 @@ export class FileSender {
   private cancelled = false;
   private offer: FileOffer | null = null;
 
+  /** True once both data channels are open and signaling stops mattering. */
+  private linked = false;
+
   constructor(
     private readonly file: File,
     private readonly onChange: (s: SenderSnapshot) => void,
@@ -143,8 +146,13 @@ export class FileSender {
           this.queueCandidate(msg.candidate);
           break;
         case "peer-left":
-          if (this.state === "transferring" || this.state === "offering") {
-            this.fail("The receiver left before the transfer finished.");
+          // Signaling only matters until the peer connection exists. After
+          // that no signaling traffic flows at all during a transfer, so the
+          // socket sits idle and proxies close it routinely — which says
+          // nothing about the receiver. Once linked, the data channel is the
+          // only honest signal, and it reports loss on its own.
+          if (!this.linked) {
+            this.fail("The receiver left before the transfer started.");
           }
           break;
       }
@@ -195,6 +203,14 @@ export class FileSender {
 
     await waitForOpen(control);
     await waitForOpen(data);
+    this.linked = true;
+
+    // Real peer loss shows up here, not on the signaling socket.
+    data.onclose = () => {
+      if (this.state === "transferring" || this.state === "verifying") {
+        this.fail("The receiver disconnected before the transfer finished.");
+      }
+    };
 
     sendControl(control, { type: "HELLO", protocolVersion: PROTOCOL_VERSION, role: "sender" });
 
@@ -322,16 +338,24 @@ export class FileSender {
    */
   private flush(data: RTCDataChannel): Promise<void> {
     return new Promise((resolve, reject) => {
+      const done = (fn: () => void) => {
+        clearInterval(timer);
+        data.removeEventListener("bufferedamountlow", onLow);
+        fn();
+      };
       const tick = () => {
-        if (data.bufferedAmount === 0) {
-          clearInterval(timer);
-          resolve();
-        } else if (data.readyState !== "open") {
-          clearInterval(timer);
-          reject(new Error("The connection dropped before the last bytes were sent."));
+        if (data.bufferedAmount === 0) done(resolve);
+        else if (data.readyState !== "open") {
+          done(() => reject(new Error("The connection dropped before the last bytes were sent.")));
         }
       };
-      const timer = setInterval(tick, 50);
+
+      // The event carries this in a backgrounded tab, where timers get
+      // throttled to once a minute; the interval is only a safety net.
+      const onLow = () => tick();
+      data.bufferedAmountLowThreshold = 0;
+      data.addEventListener("bufferedamountlow", onLow);
+      const timer = setInterval(tick, 250);
       tick();
     });
   }
