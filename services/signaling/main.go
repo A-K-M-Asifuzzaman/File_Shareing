@@ -46,9 +46,22 @@ type config struct {
 	createPerMin   int
 }
 
+// listenAddr resolves where to bind. Hosting platforms assign a port through
+// PORT and expect the process to honour it; SIGNALING_ADDR wins when set
+// explicitly, so local runs and compose files keep working.
+func listenAddr() string {
+	if addr := os.Getenv("SIGNALING_ADDR"); addr != "" {
+		return addr
+	}
+	if port := os.Getenv("PORT"); port != "" {
+		return ":" + port
+	}
+	return ":8080"
+}
+
 func loadConfig() config {
 	return config{
-		addr:           env("SIGNALING_ADDR", ":8080"),
+		addr:           listenAddr(),
 		originPatterns: strings.Split(env("ALLOWED_ORIGINS", "localhost:3000"), ","),
 		idleTTL:        envDuration("SESSION_IDLE_TTL", 10*time.Minute),
 		activeTTL:      envDuration("SESSION_ACTIVE_TTL", 30*time.Minute),
