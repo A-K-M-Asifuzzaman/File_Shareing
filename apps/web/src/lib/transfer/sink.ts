@@ -24,6 +24,7 @@ export interface WriteSink {
 
 interface FileSystemWritableStream {
   write(data: ArrayBuffer | Blob): Promise<void>;
+  truncate(size: number): Promise<void>;
   close(): Promise<void>;
   abort(): Promise<void>;
 }
@@ -96,8 +97,16 @@ class DiskSink implements WriteSink {
     return this.stream.close();
   }
   async abort(): Promise<void> {
-    // Discards the partial file rather than leaving a truncated one that
-    // looks complete.
+    // The file already exists on disk — the save dialog created it — and we
+    // cannot delete it from here. Aborting alone would leave a half-written
+    // file with a real name and a plausible size: a movie that looks fine
+    // until it will not play. Truncate to zero first so a failed transfer is
+    // unmistakable.
+    try {
+      await this.stream.truncate(0);
+    } catch {
+      /* truncate is best-effort; still abort below */
+    }
     try {
       await this.stream.abort();
     } catch {
@@ -164,12 +173,13 @@ export async function openSink(
 
   if (cap.mode === "disk") {
     const picker = savePicker()!;
-    const handle = await picker({
-      suggestedName: filename,
-      types: mimeType
-        ? [{ description: "Received file", accept: { [mimeType]: [] } }]
-        : undefined,
-    });
+
+    // No `types`. The browser enforces the saved file's extension against the
+    // extension list in an accept entry, so a type with an empty list can
+    // strip the extension off the name — the bytes are fine but nothing will
+    // open "holiday" that used to be "holiday.mkv". The extension already
+    // travels in suggestedName, which is all we need.
+    const handle = await picker({ suggestedName: filename });
     return new DiskSink(await handle.createWritable());
   }
 

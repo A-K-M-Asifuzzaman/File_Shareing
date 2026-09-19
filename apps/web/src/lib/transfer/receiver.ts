@@ -326,7 +326,10 @@ export class FileReceiver {
         code: "short_read",
         message: "Receiver got fewer bytes than declared.",
       });
-      this.fail("The transfer ended early. The received file is incomplete.");
+      this.fail(
+        "The transfer ended early, so the file is incomplete and was discarded. " +
+          "The file left where you chose to save it is empty — delete it and ask for a new link.",
+      );
       return;
     }
 
@@ -337,7 +340,10 @@ export class FileReceiver {
     if (!expectedSha256 || actual !== expectedSha256) {
       await this.sink.abort();
       this.sink = null;
-      this.fail("File verification failed. The received file may be incomplete or corrupted.");
+      this.fail(
+        "File verification failed. The received file did not match the sender's checksum, " +
+          "so it was discarded — the file left where you chose to save it is empty, not a partial copy.",
+      );
       return;
     }
 
