@@ -2,46 +2,58 @@
 
 /*
   Identity: a transmission instrument, not a storage product.
-  Near-black ground, one signal colour, monospace for anything the machine
-  measured. Colour is reserved for live state — if something is lime, it is
-  happening right now.
+  One signal colour, reserved for things that are actually happening.
+  Everything else is ink on a quiet ground, with generous space.
 */
 
 :root {
-  --ground: #f7f6f3;
+  --ground: #f6f5f2;
+  --ground-deep: #eeece7;
   --panel: #ffffff;
-  --line: #e2e0da;
-  --ink: #16171a;
-  --ink-soft: #5c5f66;
+  --panel-soft: #fbfaf8;
+  --line: #e3e0da;
+  --line-strong: #d2cec6;
+  --ink: #14161a;
+  --ink-soft: #565961;
   --ink-faint: #8b8e96;
   /* Lime fails contrast on paper, so light mode uses a deep signal green. */
-  --signal: #2f6f2a;
+  --signal: #2c6b27;
   --signal-ink: #ffffff;
-  --signal-wash: #eaf3e6;
-  --danger: #a8301c;
-  --danger-wash: #fbeceb;
+  --signal-wash: #e9f2e5;
+  --danger: #a2301c;
+  --danger-wash: #fbebe9;
+  --shadow: 0 1px 2px rgb(20 22 26 / 0.04), 0 8px 24px -12px rgb(20 22 26 / 0.12);
+  --shadow-lift: 0 2px 4px rgb(20 22 26 / 0.05), 0 24px 48px -20px rgb(20 22 26 / 0.22);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --ground: #0b0c0e;
-    --panel: #131518;
-    --line: #262a2f;
-    --ink: #f1f2f0;
-    --ink-soft: #9aa0a6;
-    --ink-faint: #6b7178;
+    --ground: #08090b;
+    --ground-deep: #050608;
+    --panel: #101216;
+    --panel-soft: #14171c;
+    --line: #22262c;
+    --line-strong: #2f343c;
+    --ink: #f2f3f1;
+    --ink-soft: #9ba1a8;
+    --ink-faint: #676d75;
     --signal: #c8f04c;
-    --signal-ink: #10130a;
-    --signal-wash: #1c2410;
+    --signal-ink: #0d1007;
+    --signal-wash: #1a220f;
     --danger: #ff8a75;
-    --danger-wash: #2a1512;
+    --danger-wash: #2b1613;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 12px 32px -16px rgb(0 0 0 / 0.8);
+    --shadow-lift: 0 2px 6px rgb(0 0 0 / 0.6), 0 32px 64px -24px rgb(0 0 0 / 0.9);
   }
 }
 
 @theme inline {
   --color-ground: var(--ground);
+  --color-ground-deep: var(--ground-deep);
   --color-panel: var(--panel);
+  --color-panel-soft: var(--panel-soft);
   --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
   --color-ink: var(--ink);
   --color-ink-soft: var(--ink-soft);
   --color-ink-faint: var(--ink-faint);
@@ -58,12 +70,47 @@ body {
   background: var(--ground);
   color: var(--ink);
   font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 /* Anything the machine measured — sizes, rates, hashes, links — is monospace. */
 .tabular {
   font-family: var(--font-mono), ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
+}
+
+/* Display type: tight, optically aligned, never letter-spaced by default. */
+.display {
+  letter-spacing: -0.035em;
+  line-height: 1.02;
+  font-weight: 500;
+}
+
+.eyebrow {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* A hairline that fades out at both ends, for section breaks. */
+.rule {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--line-strong) 18%, var(--line-strong) 82%, transparent);
+}
+
+/* Frosted surface over the WebGL field. */
+.glass {
+  background: color-mix(in oklab, var(--panel) 72%, transparent);
+  backdrop-filter: blur(16px) saturate(1.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+}
+
+@supports not (backdrop-filter: blur(4px)) {
+  .glass {
+    background: var(--panel);
+  }
 }
 
 /* The connection line, drawn as a moving dash so direction is legible. */
@@ -94,9 +141,78 @@ body {
   transform-origin: center;
 }
 
+/* A slow sweep across a surface, for live progress. */
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+.sweeping::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, var(--signal) 28%, transparent),
+    transparent
+  );
+  animation: sweep 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* Scroll reveal: visible by default, hidden only once JS says so. */
+.reveal {
+  transition:
+    opacity 900ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 900ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.reveal-pending {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.rise {
+  animation: rise 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Every animation in here is decorative; none of it carries meaning that the
+   text does not also carry. */
 @media (prefers-reduced-motion: reduce) {
   .flowing,
-  .breathing {
+  .breathing,
+  .rise,
+  .sweeping::after {
     animation: none;
   }
+  .reveal {
+    transition: none;
+  }
+  .reveal-pending {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+::selection {
+  background: var(--signal);
+  color: var(--signal-ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 3px;
+  border-radius: 6px;
 }

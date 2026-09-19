@@ -1,11 +1,11 @@
 export function Article({ title, lede, children }: { title: string; lede: string; children: React.ReactNode }) {
   return (
-    <div className="mx-auto w-full max-w-2xl px-5 py-14 sm:py-20">
-      <h1 className="text-[30px] leading-tight font-medium tracking-tight sm:text-[36px]">
+    <div className="mx-auto w-full max-w-2xl px-5 py-16 sm:py-24">
+      <h1 className="display text-[34px] sm:text-[44px]">
         {title}
       </h1>
-      <p className="mt-4 text-[17px] leading-relaxed text-ink-soft">{lede}</p>
-      <div className="mt-10 flex flex-col gap-9">{children}</div>
+      <p className="mt-5 text-[17px] leading-relaxed text-ink-soft">{lede}</p>
+      <div className="mt-12 flex flex-col gap-10">{children}</div>
     </div>
   );
 }

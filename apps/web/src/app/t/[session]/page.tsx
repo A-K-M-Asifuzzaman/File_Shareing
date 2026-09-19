@@ -7,9 +7,12 @@ import {
   FileLine,
   Notice,
   Panel,
+  PrimaryButton,
   ProgressReadout,
+  QuietButton,
   type LinkPhase,
 } from "@/components/Transfer";
+import { Field } from "@/components/Field";
 import { FileReceiver, type ReceiverSnapshot } from "@/lib/transfer/receiver";
 import { readTokenFromFragment } from "@/lib/transfer/signaling";
 import { useClientValue } from "@/lib/useClientValue";
@@ -47,8 +50,18 @@ export default function ReceivePage({ params }: PageProps<"/t/[session]">) {
     return () => receiver.cancel();
   }, [session, token]);
 
+  const active = snap?.state === "receiving" || snap?.state === "verifying";
+  const live = Boolean(snap && snap.state !== "declined");
+
   return (
-    <div className="mx-auto w-full max-w-xl px-5 py-12 sm:py-16">
+    <div className="relative isolate min-h-[70vh] overflow-hidden">
+      <div className="absolute inset-0 -z-10 bg-ground-deep" />
+      <Field
+        intensity={active ? 1 : live ? 0.4 : 0.12}
+        progress={snap?.progress.fraction ?? 0}
+        className="-z-10 opacity-90"
+      />
+      <div className="mx-auto w-full max-w-xl px-5 py-16 sm:py-24">
       {noToken ? (
         <Panel>
           <h1 className="text-[20px] font-medium tracking-tight">This link is incomplete</h1>
@@ -65,6 +78,7 @@ export default function ReceivePage({ params }: PageProps<"/t/[session]">) {
       ) : (
         <ReceiverView snap={snap} onAccept={() => receiverRef.current?.accept()} onDecline={() => receiverRef.current?.decline()} />
       )}
+      </div>
     </div>
   );
 }
@@ -88,11 +102,11 @@ function ReceiverView({
         <p className="text-[15px] text-ink-soft">Incoming transfer</p>
       )}
 
-      <div className="mt-6">
+      <div className="mt-7">
         <Endpoints phase={PHASE[snap.state]} from="Them" to="This device" />
       </div>
 
-      <div className="mt-6 flex flex-col gap-5">
+      <div className="mt-7 flex flex-col gap-5">
         {(snap.state === "connecting" || snap.state === "waiting") && (
           <Notice>Connecting to the sender&hellip;</Notice>
         )}
@@ -110,22 +124,10 @@ function ReceiverView({
                   will be asked where to save it.
                 </Notice>
                 <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    /* Called straight from the click: the save dialog only
-                       opens inside a user gesture. */
-                    onClick={onAccept}
-                    className="rounded-lg bg-signal px-5 py-3 text-[15px] font-medium text-signal-ink transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
-                  >
-                    Accept and save
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onDecline}
-                    className="rounded-lg border border-line px-5 py-3 text-[15px] transition-colors hover:bg-ground"
-                  >
-                    Decline
-                  </button>
+                  {/* Called straight from the click: the save dialog only
+                      opens inside a user gesture. */}
+                  <PrimaryButton onClick={onAccept}>Accept and save</PrimaryButton>
+                  <QuietButton onClick={onDecline}>Decline</QuietButton>
                 </div>
               </>
             ) : (
