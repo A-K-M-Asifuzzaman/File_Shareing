@@ -1,10 +1,10 @@
-# Transfer protocol v1
+# Transfer protocol v2
 
 This is the contract between the two peers. It is deliberately independent of
 any UI framework so the web client and the later Flutter client implement the
 same thing.
 
-Current version: **1** (see `VERSION`).
+Current version: **2** (see `VERSION`).
 
 Both peers exchange `protocolVersion` in the first control message. Mismatch is
 a hard failure with a clear message — never a best-effort attempt to carry on.
@@ -52,32 +52,85 @@ WebRTC impolite peer (it makes the offer); the receiver answers.
 ## Control messages
 
 ```jsonc
-{ "type": "HELLO", "protocolVersion": 1, "role": "sender" | "receiver" }
+{ "type": "HELLO", "protocolVersion": 2, "role": "sender" | "receiver" }
 
-{ "type": "FILE_OFFER",
+// One offer describes the whole batch. A single file is a batch of one;
+// there is no second code path for it.
+{ "type": "MANIFEST",
   "transferId": "...",
-  "fileId": "...",
-  "name": "ubuntu.iso",
-  "size": "8402653184",        // decimal string — see below
-  "mimeType": "application/x-iso9660-image",
-  "lastModified": 1735689600000,
-  "chunkSize": 65536 }
+  "chunkSize": 65536,
+  "totalBytes": "8402653184",     // decimal string — see below
+  "note": "the raws from saturday",   // optional, free text, may be absent
+  "files": [
+    { "fileId": "...",
+      "name": "ubuntu.iso",       // last path segment only, never a path
+      "path": "isos/2024",        // relative directory inside the batch, "" if none
+      "size": "8402653184",
+      "mimeType": "application/x-iso9660-image",
+      "lastModified": 1735689600000 }
+  ] }
 
-{ "type": "FILE_ACCEPT", "fileId": "..." }
-{ "type": "FILE_REJECT", "fileId": "...", "reason": "declined" }
+{ "type": "MANIFEST_ACCEPT", "transferId": "..." }
+{ "type": "MANIFEST_REJECT", "transferId": "...", "reason": "declined" }
 
-{ "type": "TRANSFER_START", "fileId": "..." }
-{ "type": "PAUSE",  "fileId": "..." }
-{ "type": "RESUME", "fileId": "...", "fromOffset": "1073741824" }
+{ "type": "TRANSFER_START", "transferId": "..." }
 
-{ "type": "CHECKPOINT", "fileId": "...", "receivedBytes": "1073741824" }
+{ "type": "PAUSE",  "transferId": "..." }
+{ "type": "RESUME", "transferId": "...", "fromOffset": "1073741824" }
 
-{ "type": "TRANSFER_COMPLETE", "fileId": "...", "sha256": "..." }
-{ "type": "TRANSFER_FAILED",   "fileId": "...", "code": "...", "message": "..." }
+// Sent after the last byte of each file, and acknowledged per file.
+{ "type": "FILE_DONE",     "fileId": "...", "sha256": "..." }
+{ "type": "FILE_VERIFIED", "fileId": "..." }
+
+{ "type": "TRANSFER_COMPLETE", "transferId": "..." }   // sender: that was the last byte
+{ "type": "TRANSFER_VERIFIED", "transferId": "..." }   // receiver: all files written and checked
+{ "type": "TRANSFER_FAILED",   "transferId": "...", "code": "...", "message": "..." }
 ```
 
-`FILE_OFFER` carries only what the receiver needs to decide and to allocate.
-No paths, no EXIF, no thumbnails, no anything else from the sender's disk.
+`MANIFEST` carries only what the receiver needs to decide and to allocate. No
+absolute paths, no EXIF, no thumbnails, no anything else from the sender's disk.
+`path` exists solely so a sent folder can be recreated rather than flattened;
+it is relative, and every segment is sanitized on arrival.
+
+### What changed from v1
+
+v1 exchanged one `FILE_OFFER` per file and accepted it one at a time. v2
+replaces that with the manifest above, because the round trip per file made a
+folder of small files far slower than the same bytes in one file, and because
+the receiver could not ask for a destination once for the whole batch.
+
+`FILE_OFFER`, `FILE_ACCEPT`, `FILE_REJECT` and the per-file
+`TRANSFER_COMPLETE` are gone. The version is checked in `HELLO` and a mismatch
+is a hard failure, so a v1 client meeting a v2 client is told to reload rather
+than half-working.
+
+---
+
+## Batching and file boundaries
+
+Files stream **back to back on the data channel with nothing between them** —
+no per-file header, no separator, no round trip. The manifest already gives
+every size, so the receiver knows where each file ends by counting bytes:
+
+```
+position in batch  ->  (file index, offset in that file)
+```
+
+A chunk may therefore straddle a boundary, and several small files may land
+inside one chunk. The receiver splits accordingly, closing one file and opening
+the next mid-chunk. That arithmetic is the part that corrupts a transfer
+silently if it is wrong — an off-by-one puts the tail of one file at the head of
+the next and both fail their checksums — so it is isolated and tested on its own
+(`apps/web/src/lib/transfer/cursor.ts`).
+
+`FILE_DONE` rides the control channel, which is a **separate SCTP stream** from
+the data channel and can therefore overtake the tail of its own file. The
+receiver parks the digest until its own byte count says that file is whole, and
+only then compares. The same hazard is why `TRANSFER_COMPLETE` is sent only
+after the data channel's send buffer has fully drained.
+
+Bytes arriving past the end of the last declared file are an overflow, not data:
+the receiver aborts rather than writing them.
 
 ---
 
@@ -145,10 +198,16 @@ than a 100 MB one.
 
 ## Integrity
 
-The sender hashes as it reads, in a Web Worker, and sends SHA-256 in
-`TRANSFER_COMPLETE`. The receiver hashes as it writes and compares. A mismatch
-fails the transfer loudly — a corrupt 100 GB file that claims success is worse
-than an honest failure.
+Per file, not per transfer. The sender hashes each file as it reads, in a Web
+Worker, and sends SHA-256 in that file's `FILE_DONE`. The receiver hashes as it
+writes and compares when the file completes, answering `FILE_VERIFIED`. A
+mismatch fails the whole transfer loudly and names the file — a corrupt 100 GB
+file that claims success is worse than an honest failure.
+
+A file that fails verification is truncated to zero rather than left as a
+plausible-looking partial, and deleted outright where the receiver holds a
+directory handle. Files verified earlier in the same batch are already closed
+and are left intact.
 
 ---
 
@@ -163,9 +222,15 @@ and the enforced limit must be the same number. Defined once per language:
 
 - Go: `MaxTransferBytes` in `services/signaling/main.go`
 - TypeScript: `MAX_TRANSFER_BYTES` in `apps/web`
+- Dart: `maxTransferBytes` in `apps/mobile/packages/direct_protocol`
 
-If multiple files per transfer are added later, the limit applies to the total
-payload, not per file.
+The limit applies to the **total payload of a transfer**, not to each file. A
+receiver recomputes the total from the manifest's own entries and rejects a
+manifest whose declared total disagrees with them, so understating it buys
+nothing.
+
+A transfer also carries at most **500 files** (`MAX_FILES_PER_TRANSFER`), which
+bounds the manifest itself rather than the bytes.
 
 ---
 

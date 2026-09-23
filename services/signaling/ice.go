@@ -53,7 +53,14 @@ type iceProvider struct {
 }
 
 func newICEProvider() *iceProvider {
-	stun := strings.Split(env("STUN_URLS", "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302"), ",")
+	// LookupEnv, not env(): STUN_URLS set to empty means "no STUN", which is a
+	// real configuration — a LAN-only deployment, or a test that must not
+	// depend on a third party — and is not the same as leaving it unset.
+	raw, set := os.LookupEnv("STUN_URLS")
+	if !set {
+		raw = "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302"
+	}
+	stun := strings.Split(raw, ",")
 	urls := make([]string, 0, len(stun))
 	for _, u := range stun {
 		if u = strings.TrimSpace(u); u != "" {

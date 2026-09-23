@@ -25,12 +25,19 @@ import (
 
 // ProtocolVersion is the transfer protocol both clients must agree on.
 // Bumped only on a breaking wire change; see protocol/README.md.
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 // MaxTransferBytes is the one place the 100 GB limit is defined. Decimal GB,
 // not GiB — the number the UI shows and the number the code enforces are the
-// same number. apps/web mirrors this in protocol/limits.ts.
+// same number. It applies to a whole transfer, not to each file in it.
+// Mirrored by MAX_TRANSFER_BYTES in apps/web and maxTransferBytes in
+// apps/mobile/packages/direct_protocol; see protocol/README.md.
 const MaxTransferBytes int64 = 100_000_000_000
+
+// MaxFilesPerTransfer bounds the manifest itself rather than the bytes. A
+// batch of half a million entries would be a denial of service against the
+// receiver's own UI long before it ran out of disk.
+const MaxFilesPerTransfer = 500
 
 // maxSignalBytes caps a single signaling message. SDP for a data-channel-only
 // session is a few KB; 64 KiB leaves room without letting a client stream
@@ -168,6 +175,7 @@ type createSessionResponse struct {
 	ReceiverToken    string `json:"receiverToken"`
 	ProtocolVersion  int    `json:"protocolVersion"`
 	MaxTransferBytes string `json:"maxTransferBytes"` // decimal string: exceeds 2^53
+	MaxFiles         int    `json:"maxFiles"`
 	ExpiresInSeconds int    `json:"expiresInSeconds"`
 }
 
@@ -193,6 +201,7 @@ func (s *server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		ReceiverToken:    receiverToken,
 		ProtocolVersion:  ProtocolVersion,
 		MaxTransferBytes: strconv.FormatInt(MaxTransferBytes, 10),
+		MaxFiles:         MaxFilesPerTransfer,
 		ExpiresInSeconds: int(s.cfg.idleTTL.Seconds()),
 	})
 }
