@@ -1,14 +1,22 @@
 /**
- * Wire protocol v1. Mirrors protocol/README.md — change both together.
+ * Wire protocol v2. Mirrors protocol/README.md — change both together.
  *
  * Deliberately free of React and of any browser API so the same shapes can be
  * ported to Dart for the mobile client.
+ *
+ * v2 replaces v1's single-file exchange with a manifest: one offer describes
+ * the whole batch, and the files then stream back to back over the data
+ * channel with no per-file round trip. A single file is a batch of one, so
+ * there is no second code path.
  */
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** 100 GB, decimal. The number the UI shows is the number we enforce. */
 export const MAX_TRANSFER_BYTES = 100_000_000_000n;
+
+/** A batch cannot be unbounded either — this caps the file count. */
+export const MAX_FILES_PER_TRANSFER = 500;
 
 /** Default chunk size; clamped at runtime to the negotiated SCTP maximum. */
 export const DEFAULT_CHUNK_SIZE = 64 * 1024;
@@ -38,6 +46,18 @@ export type SignalMessage =
 /* Control channel                                                            */
 /* -------------------------------------------------------------------------- */
 
+/** One file inside a manifest, as it crosses the wire. */
+export interface ManifestEntryWire {
+  fileId: string;
+  /** Display name, no directory separators. */
+  name: string;
+  /** Relative path inside the batch when a folder was sent; "" otherwise. */
+  path: string;
+  size: string;
+  mimeType: string;
+  lastModified: number;
+}
+
 /**
  * Byte counts cross the wire as decimal strings. Go and Dart have a real
  * int64 and JavaScript does not, so a bare JSON number would round through a
@@ -46,75 +66,116 @@ export type SignalMessage =
 export type ControlMessage =
   | { type: "HELLO"; protocolVersion: number; role: Role }
   | {
-      type: "FILE_OFFER";
+      type: "MANIFEST";
       transferId: string;
-      fileId: string;
-      name: string;
-      size: string;
-      mimeType: string;
-      lastModified: number;
       chunkSize: number;
+      totalBytes: string;
+      files: ManifestEntryWire[];
+      /** Optional note the sender typed alongside the files. */
+      note?: string;
     }
-  | { type: "FILE_ACCEPT"; fileId: string }
-  | { type: "FILE_REJECT"; fileId: string; reason: string }
-  | { type: "TRANSFER_START"; fileId: string }
-  | { type: "PAUSE"; fileId: string }
-  | { type: "RESUME"; fileId: string; fromOffset: string }
-  | { type: "CHECKPOINT"; fileId: string; receivedBytes: string }
-  | { type: "TRANSFER_COMPLETE"; fileId: string; sha256: string }
-  // Sent by the receiver once the file is written and its hash checked. The
+  | { type: "MANIFEST_ACCEPT"; transferId: string }
+  | { type: "MANIFEST_REJECT"; transferId: string; reason: string }
+  | { type: "TRANSFER_START"; transferId: string }
+  // Sent after the last byte of a file. Control and data are separate SCTP
+  // streams, so this can overtake the file's tail — the receiver holds it
+  // until its own byte count says the file is whole.
+  | { type: "FILE_DONE"; fileId: string; sha256: string }
+  | { type: "FILE_VERIFIED"; fileId: string }
+  | { type: "PAUSE"; transferId: string }
+  | { type: "RESUME"; transferId: string; fromOffset: string }
+  | { type: "TRANSFER_COMPLETE"; transferId: string }
+  // Sent by the receiver once every file is written and its hash checked. The
   // sender waits for this before telling anyone the transfer succeeded.
-  | { type: "TRANSFER_VERIFIED"; fileId: string }
-  | { type: "TRANSFER_FAILED"; fileId: string; code: string; message: string };
+  | { type: "TRANSFER_VERIFIED"; transferId: string }
+  | { type: "TRANSFER_FAILED"; transferId: string; code: string; message: string };
 
-export interface FileOffer {
-  transferId: string;
+/* -------------------------------------------------------------------------- */
+/* Manifest                                                                   */
+/* -------------------------------------------------------------------------- */
+
+export interface ManifestEntry {
   fileId: string;
   name: string;
+  /** Sanitized relative path, or "" for a file sent on its own. */
+  path: string;
   size: bigint;
   mimeType: string;
   lastModified: number;
-  chunkSize: number;
 }
 
-export function offerToMessage(o: FileOffer): ControlMessage {
+export interface Manifest {
+  transferId: string;
+  chunkSize: number;
+  totalBytes: bigint;
+  files: ManifestEntry[];
+  note: string;
+}
+
+export function manifestToMessage(m: Manifest): ControlMessage {
   return {
-    type: "FILE_OFFER",
-    transferId: o.transferId,
-    fileId: o.fileId,
-    name: o.name,
-    size: o.size.toString(),
-    mimeType: o.mimeType,
-    lastModified: o.lastModified,
-    chunkSize: o.chunkSize,
+    type: "MANIFEST",
+    transferId: m.transferId,
+    chunkSize: m.chunkSize,
+    totalBytes: m.totalBytes.toString(),
+    note: m.note || undefined,
+    files: m.files.map((f) => ({
+      fileId: f.fileId,
+      name: f.name,
+      path: f.path,
+      size: f.size.toString(),
+      mimeType: f.mimeType,
+      lastModified: f.lastModified,
+    })),
   };
 }
 
 /**
- * Parse a FILE_OFFER from an untrusted peer. Everything is validated: the
- * sender is a stranger on the internet, and `name` in particular ends up in
- * the DOM and in a save dialog.
+ * Parse a MANIFEST from an untrusted peer. Everything is validated: the
+ * sender is a stranger on the internet, and `name` and `path` in particular
+ * end up in the DOM and in a save dialog.
  */
-export function offerFromMessage(m: ControlMessage): FileOffer {
-  if (m.type !== "FILE_OFFER") throw new Error(`expected FILE_OFFER, got ${m.type}`);
+export function manifestFromMessage(m: ControlMessage): Manifest {
+  if (m.type !== "MANIFEST") throw new Error(`expected MANIFEST, got ${m.type}`);
 
-  const size = parseByteCount(m.size, "size");
-  if (size <= 0n) throw new Error("file size must be positive");
-  if (size > MAX_TRANSFER_BYTES) {
-    throw new Error(`file exceeds the ${formatBytes(MAX_TRANSFER_BYTES)} limit`);
+  if (!Array.isArray(m.files) || m.files.length === 0) {
+    throw new Error("the manifest lists no files");
+  }
+  if (m.files.length > MAX_FILES_PER_TRANSFER) {
+    throw new Error(`a transfer can carry at most ${MAX_FILES_PER_TRANSFER} files`);
   }
   if (!Number.isInteger(m.chunkSize) || m.chunkSize < 1024 || m.chunkSize > 1024 * 1024) {
     throw new Error("chunk size out of range");
   }
 
+  const files: ManifestEntry[] = m.files.map((f) => {
+    const size = parseByteCount(f.size, "size");
+    if (size <= 0n) throw new Error("file size must be positive");
+    return {
+      fileId: String(f.fileId).slice(0, 128),
+      name: sanitizeFilename(f.name),
+      path: sanitizePath(f.path),
+      size,
+      mimeType: String(f.mimeType ?? "").slice(0, 255),
+      lastModified: Number.isFinite(f.lastModified) ? f.lastModified : Date.now(),
+    };
+  });
+
+  // Trust our own arithmetic over the sender's claimed total.
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0n);
+  if (totalBytes > MAX_TRANSFER_BYTES) {
+    throw new Error(`the transfer exceeds the ${formatBytes(MAX_TRANSFER_BYTES)} limit`);
+  }
+
+  const declared = parseByteCount(m.totalBytes, "totalBytes");
+  if (declared !== totalBytes) throw new Error("the manifest's total does not match its files");
+
   return {
     transferId: String(m.transferId).slice(0, 128),
-    fileId: String(m.fileId).slice(0, 128),
-    name: sanitizeFilename(m.name),
-    size,
-    mimeType: String(m.mimeType ?? "").slice(0, 255),
-    lastModified: Number.isFinite(m.lastModified) ? m.lastModified : Date.now(),
     chunkSize: m.chunkSize,
+    totalBytes,
+    files,
+    note: sanitizeNote(m.note),
   };
 }
 
@@ -126,27 +187,62 @@ export function parseByteCount(raw: string, field: string): bigint {
   return BigInt(raw);
 }
 
+/** Drop C0 controls and DEL, which would mangle the UI or a filename. */
+function printable(raw: unknown): string {
+  return Array.from(String(raw ?? ""))
+    .filter((ch) => {
+      const code = ch.codePointAt(0) ?? 0;
+      return code > 0x1f && code !== 0x7f;
+    })
+    .join("");
+}
+
 /**
  * A filename from a remote peer is attacker-controlled. Strip directory
  * separators and traversal so it cannot escape wherever the receiver saves it,
  * and drop control characters that would mangle the UI.
  */
 export function sanitizeFilename(raw: unknown): string {
-  const printable = Array.from(String(raw ?? ""))
-    .filter((ch) => {
-      const code = ch.codePointAt(0) ?? 0;
-      return code > 0x1f && code !== 0x7f; // drop C0 controls and DEL
-    })
-    .join("");
-
   // Keep only the last path segment. A peer sending "../../etc/passwd" gets
   // "passwd" — no separators survive, so there is nothing left to traverse
   // with, and the result is still a usable filename.
-  const base = printable.split(/[/\\]/).pop() ?? "";
+  const base = printable(raw).split(/[/\\]/).pop() ?? "";
 
   // Leading dots would make it hidden, and "." / ".." are not filenames.
   const cleaned = base.replace(/^\.+/, "").trim().slice(0, 200);
   return cleaned.length > 0 ? cleaned : "received-file";
+}
+
+/**
+ * A relative directory path from a remote peer, for recreating a sent folder.
+ *
+ * Every segment goes through the same rules as a filename, and any segment
+ * that sanitizes to nothing — "..", ".", "" — is dropped rather than
+ * substituted, so a hostile path collapses toward the chosen directory
+ * instead of climbing out of it. Windows separators are normalised, and a
+ * drive letter or UNC prefix cannot survive because ":" is not a separator
+ * and the segment is still relative.
+ */
+export function sanitizePath(raw: unknown): string {
+  const segments = printable(raw)
+    .split(/[/\\]/)
+    .map((seg) => seg.replace(/^\.+/, "").trim().slice(0, 200))
+    .filter((seg) => seg.length > 0);
+
+  // A pathological depth is not worth recreating on someone's disk.
+  return segments.slice(0, 16).join("/");
+}
+
+/** The sender's note is free text that lands in the DOM; keep it short and clean. */
+export function sanitizeNote(raw: unknown): string {
+  if (raw == null) return "";
+  return Array.from(String(raw))
+    .filter((ch) => {
+      const code = ch.codePointAt(0) ?? 0;
+      return code === 0x0a || (code > 0x1f && code !== 0x7f);
+    })
+    .join("")
+    .slice(0, 2000);
 }
 
 export function isControlMessage(v: unknown): v is ControlMessage {
@@ -188,4 +284,9 @@ export function formatDuration(seconds: number): string {
 
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
+}
+
+/** "3 files" / "1 file", for the many places that say it. */
+export function countFiles(n: number): string {
+  return n === 1 ? "1 file" : `${n} files`;
 }

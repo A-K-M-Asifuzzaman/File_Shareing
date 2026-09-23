@@ -6,6 +6,10 @@ export interface Progress {
   bytesPerSecond: number;
   /** Seconds remaining, or null while the rate is still meaningless. */
   etaSeconds: number | null;
+  /** Recent rate samples, oldest first, for the throughput sparkline. */
+  history: number[];
+  /** Seconds since the transfer started. */
+  elapsedSeconds: number;
 }
 
 const EMPTY: Progress = {
@@ -14,6 +18,8 @@ const EMPTY: Progress = {
   fraction: 0,
   bytesPerSecond: 0,
   etaSeconds: null,
+  history: [],
+  elapsedSeconds: 0,
 };
 
 /**
@@ -27,14 +33,24 @@ const EMPTY: Progress = {
 export class ProgressMeter {
   private total = 0n;
   private transferred = 0n;
+  private startedAt = 0;
   private samples: { at: number; bytes: bigint }[] = [];
 
+  /** One rate reading per tick, capped — the sparkline's data. */
+  private rates: number[] = [];
+  private lastTick = 0;
+
   private static readonly WINDOW_MS = 5_000;
+  private static readonly TICK_MS = 500;
+  private static readonly HISTORY = 48;
 
   start(total: bigint): void {
     this.total = total;
     this.transferred = 0n;
-    this.samples = [{ at: performance.now(), bytes: 0n }];
+    this.startedAt = performance.now();
+    this.lastTick = this.startedAt;
+    this.samples = [{ at: this.startedAt, bytes: 0n }];
+    this.rates = [];
   }
 
   set(transferred: bigint): void {
@@ -45,30 +61,44 @@ export class ProgressMeter {
 
     // Keep one sample older than the window so the span is always full-length.
     let drop = 0;
-    while (drop + 1 < this.samples.length && now - this.samples[drop + 1]!.at > ProgressMeter.WINDOW_MS) {
+    while (
+      drop + 1 < this.samples.length &&
+      now - this.samples[drop + 1]!.at > ProgressMeter.WINDOW_MS
+    ) {
       drop++;
     }
     if (drop > 0) this.samples.splice(0, drop);
+
+    // Sample the smoothed rate on a fixed cadence, so the sparkline's x axis
+    // is time rather than "however often chunks happened to land".
+    if (now - this.lastTick >= ProgressMeter.TICK_MS) {
+      this.lastTick = now;
+      this.rates.push(this.rate());
+      if (this.rates.length > ProgressMeter.HISTORY) this.rates.shift();
+    }
+  }
+
+  private rate(): number {
+    const first = this.samples[0];
+    const last = this.samples[this.samples.length - 1];
+    if (!first || !last || last.at <= first.at) return 0;
+    return (Number(last.bytes - first.bytes) * 1000) / (last.at - first.at);
   }
 
   snapshot(): Progress {
     if (this.total <= 0n) return EMPTY;
 
-    const first = this.samples[0];
-    const last = this.samples[this.samples.length - 1];
-
-    let bytesPerSecond = 0;
-    if (first && last && last.at > first.at) {
-      bytesPerSecond = (Number(last.bytes - first.bytes) * 1000) / (last.at - first.at);
-    }
-
+    const bytesPerSecond = this.rate();
     const remaining = Number(this.total - this.transferred);
+
     return {
       transferred: this.transferred,
       total: this.total,
       fraction: Number(this.transferred) / Number(this.total),
       bytesPerSecond,
       etaSeconds: bytesPerSecond > 0 && remaining > 0 ? remaining / bytesPerSecond : null,
+      history: this.rates,
+      elapsedSeconds: this.startedAt > 0 ? (performance.now() - this.startedAt) / 1000 : 0,
     };
   }
 }

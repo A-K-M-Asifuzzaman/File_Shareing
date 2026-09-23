@@ -1,20 +1,36 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Geist, Geist_Mono } from "next/font/google";
+import { ThemeColor } from "@/components/ThemeColor";
+import { ThemeToggle } from "@/components/ThemeToggle";
+import { THEME_SCRIPT } from "@/lib/ui/theme";
 import "./globals.css";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Direct — peer-to-peer file transfer",
+  title: {
+    default: "Direct — peer-to-peer file transfer",
+    template: "%s — Direct",
+  },
   description:
-    "Send a file straight from your device to someone else's. Nothing is stored on a server.",
+    "Send files straight from your device to someone else's. Up to 100 GB, folders included, SHA-256 verified, and nothing is stored on a server.",
+  applicationName: "Direct",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: { capable: true, title: "Direct", statusBarStyle: "black-translucent" },
+  openGraph: {
+    title: "Direct — peer-to-peer file transfer",
+    description:
+      "Files go browser to browser over WebRTC. No upload, no bucket, no copy left behind.",
+    type: "website",
+  },
 };
 
 const NAV = [
   { href: "/how-it-works", label: "How it works" },
   { href: "/security", label: "Security" },
+  { href: "/diagnostics", label: "Diagnostics" },
   { href: "/privacy", label: "Privacy" },
   { href: "/compatibility", label: "Compatibility" },
 ] as const;
@@ -24,16 +40,30 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      suppressHydrationWarning
     >
+      <head>
+        {/* Before first paint: otherwise the stored theme lands a frame late
+            and a dark-mode user gets a white flash on every navigation. */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
       <body className="flex min-h-full flex-col">
+        <ThemeColor />
+        <a
+          href="#main"
+          className="sr-only focus:not-sr-only focus:absolute focus:top-3 focus:left-3 focus:z-[60] focus:rounded-lg focus:bg-panel focus:px-4 focus:py-2 focus:text-[14px]"
+        >
+          Skip to content
+        </a>
+
         <header className="sticky top-0 z-50 border-b border-line/70 glass">
-          <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-5 py-4">
+          <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-4 px-5 py-4">
             <Link href="/" className="group flex items-center gap-2.5" aria-label="Direct, home">
               <Mark />
               <span className="text-[15px] font-medium tracking-tight">Direct</span>
             </Link>
 
-            <nav className="hidden items-center gap-1 text-[13px] sm:flex">
+            <nav className="hidden items-center gap-1 text-[13px] lg:flex">
               {NAV.map((item) => (
                 <Link
                   key={item.href}
@@ -45,16 +75,21 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
               ))}
             </nav>
 
-            <Link
-              href="/how-it-works"
-              className="rounded-lg px-3 py-2 text-[13px] text-ink-soft transition-colors hover:text-ink sm:hidden"
-            >
-              How it works
-            </Link>
+            <div className="flex items-center gap-2">
+              <Link
+                href="/how-it-works"
+                className="rounded-lg px-2 py-2 text-[13px] text-ink-soft transition-colors hover:text-ink lg:hidden"
+              >
+                How it works
+              </Link>
+              <ThemeToggle />
+            </div>
           </div>
         </header>
 
-        <main className="flex-1">{children}</main>
+        <main id="main" className="flex-1">
+          {children}
+        </main>
 
         <footer className="border-t border-line">
           <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-5 py-8 sm:flex-row sm:items-center sm:justify-between">
@@ -62,9 +97,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
               <p className="text-[13px] text-ink-soft">
                 Files move device to device. No copy is kept.
               </p>
-              <p className="tabular text-[11px] text-ink-faint">Protocol v1 · 100 GB ceiling</p>
+              <p className="tabular text-[11px] text-ink-faint">
+                Protocol v2 · 100 GB ceiling · folders and batches
+              </p>
             </div>
-            <nav className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] sm:hidden">
+            <nav className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] lg:hidden">
               {NAV.map((item) => (
                 <Link key={item.href} href={item.href} className="text-ink-soft hover:text-ink">
                   {item.label}

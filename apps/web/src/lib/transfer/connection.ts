@@ -1,5 +1,5 @@
 import { DEFAULT_CHUNK_SIZE, type ControlMessage, type SignalMessage } from "./protocol";
-import { currentIce, type SignalingChannel } from "./signaling";
+import { currentIce, prefetchIce, type SignalingChannel } from "./signaling";
 
 /**
  * ICE servers for a new connection.
@@ -17,6 +17,17 @@ export function relayAvailable(): boolean {
   return currentIce().relayAvailable;
 }
 
+/** One message, so both peers explain a dead connection the same way. */
+export function unreachableMessage(): string {
+  return relayAvailable()
+    ? "Could not open a connection, even through the relay. Both devices need to stay online — " +
+        "if one is on a locked-down corporate or campus network, try a different network."
+    : "Could not open a direct connection. This is usually mobile data or a restrictive Wi-Fi — " +
+        "the quickest thing to try is putting both devices on the same Wi-Fi network. Getting " +
+        "through anyway needs a relay server, which is not configured.";
+}
+
+
 export interface Channels {
   control: RTCDataChannel;
   data: RTCDataChannel;
@@ -26,13 +37,23 @@ export interface Channels {
  * Wires ICE candidate exchange onto an existing signaling channel. Candidates
  * that arrive before the remote description is set are buffered — otherwise
  * addIceCandidate throws and the connection quietly fails to form.
+ *
+ * Awaits the ICE configuration rather than reading whatever has arrived so
+ * far. The fetch is started when the page loads and is memoised, so this
+ * almost always resolves immediately — but "almost always" is the problem it
+ * fixes. The receiver builds its connection the moment the sender's offer
+ * lands, which on a fast link is sooner than the config comes back, and it
+ * would then negotiate against the STUN-only fallback: no relay for the one
+ * peer most likely to need it, and on a service configured for no STUN at
+ * all, a stray server-reflexive candidate that stops the pair forming.
  */
-export function createPeerConnection(signaling: SignalingChannel): {
+export async function createPeerConnection(signaling: SignalingChannel): Promise<{
   pc: RTCPeerConnection;
   addRemoteCandidate: (init: RTCIceCandidateInit) => void;
   onRemoteDescriptionSet: () => Promise<void>;
-} {
-  const pc = new RTCPeerConnection({ iceServers: iceServers() });
+}> {
+  const { iceServers: servers } = await prefetchIce();
+  const pc = new RTCPeerConnection({ iceServers: servers });
 
   pc.onicecandidate = (ev) => {
     if (ev.candidate) signaling.send({ type: "ice", candidate: ev.candidate.toJSON() });

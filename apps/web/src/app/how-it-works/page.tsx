@@ -3,23 +3,24 @@ import { Article, Points, Section } from "@/components/Prose";
 
 export const metadata: Metadata = {
   title: "How it works — Direct",
-  description: "What actually happens when you send a file.",
+  description: "What actually happens when you send files.",
 };
 
 export default function HowItWorksPage() {
   return (
     <Article
+      eyebrow="The mechanism"
       title="How it works"
-      lede="Most file sharing uploads your file to a company's servers and gives the other person a link to download it. This does not do that. The file goes from your device to theirs."
+      lede="Most file sharing uploads your files to a company's servers and gives the other person a link to download them. This does not do that. The files go from your device to theirs."
     >
       <Section heading="The short version">
         <Points
           items={[
-            "You pick a file. It stays on your disk.",
-            "You get a link and send it to the other person however you like.",
+            "You pick files, or a whole folder. They stay on your disk.",
+            "You get one link — or a QR code — and send it however you like.",
             "They open it, and the two browsers find each other and connect.",
-            "The file streams across that connection in small pieces.",
-            "Both devices check the file matches when it finishes.",
+            "The files stream across that connection in small pieces, one after another.",
+            "Both devices check every file matches as it finishes.",
           ]}
         />
       </Section>
@@ -37,11 +38,25 @@ export default function HowItWorksPage() {
         </p>
       </Section>
 
+      <Section heading="Several files at once">
+        <p>
+          A transfer carries a batch: a handful of files, or a folder with its structure intact.
+          The other side is told the whole list up front — names and sizes, nothing else — and
+          decides once, for all of it.
+        </p>
+        <p>
+          The files then stream back to back with nothing in between. There is no pause between
+          one file and the next and no round trip to negotiate each one, which is what keeps a
+          folder of two hundred small files from taking longer than the one big file beside it.
+          Each file still gets its own checksum, so a failure names the file it happened to.
+        </p>
+      </Section>
+
       <Section heading="Why both tabs have to stay open">
         <p>
-          The file is read from your disk as it sends. There is no copy sitting anywhere else,
-          so if you close the tab, there is nothing left to send from. The same is true in
-          reverse — the other person has to be there to receive it.
+          The files are read from your disk as they send. There is no copy sitting anywhere
+          else, so if you close the tab, there is nothing left to send from. The same is true in
+          reverse — the other person has to be there to receive them.
         </p>
         <p>
           This is the real trade-off compared to an upload service. You cannot send a file to
@@ -52,9 +67,10 @@ export default function HowItWorksPage() {
 
       <Section heading="Large files">
         <p>
-          The limit is 100 GB per transfer. Neither side ever holds the whole file in memory: it
-          is read in 64 KB pieces, sent, and written straight to disk on the other end. A 100 GB
-          transfer uses about as much memory as a 100 MB one.
+          The limit is 100 GB per transfer, counted across every file in it. Neither side ever
+          holds a whole file in memory: bytes are read in 64 KB pieces, sent, and written
+          straight to disk on the other end. A 100 GB transfer uses about as much memory as a
+          100 MB one.
         </p>
         <p>
           Writing directly to disk needs a browser feature that not every browser has. If yours
@@ -66,7 +82,12 @@ export default function HowItWorksPage() {
         <p>
           Some networks — corporate firewalls, a few mobile carriers — will not allow two devices
           to talk to each other directly. When that happens the connection fails outright and
-          the page tells you. It does not silently reroute your file through somewhere else.
+          the page tells you. It does not silently reroute your files through somewhere else.
+        </p>
+        <p>
+          The diagnostics page tests this network without starting a transfer, and says which
+          kinds of path it managed to find. That turns &ldquo;it will not connect&rdquo; into
+          something specific enough to act on.
         </p>
       </Section>
     </Article>

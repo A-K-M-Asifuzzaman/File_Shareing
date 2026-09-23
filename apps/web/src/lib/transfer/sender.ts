@@ -3,17 +3,23 @@ import {
   createPeerConnection,
   negotiatedChunkSize,
   sendControl,
+  unreachableMessage,
   waitForOpen,
 } from "./connection";
 import { StreamHasher } from "./hasher";
 import {
+  MAX_FILES_PER_TRANSFER,
   MAX_TRANSFER_BYTES,
   PROTOCOL_VERSION,
   formatBytes,
   isControlMessage,
-  offerToMessage,
+  manifestToMessage,
+  sanitizeFilename,
+  sanitizeNote,
+  sanitizePath,
   type ControlMessage,
-  type FileOffer,
+  type Manifest,
+  type ManifestEntry,
   type SignalMessage,
 } from "./protocol";
 import { SignalingChannel, createSession, buildShareUrl, type SessionCredentials } from "./signaling";
@@ -31,13 +37,27 @@ export type SenderState =
   | "declined"
   | "failed";
 
+export type FileState = "queued" | "sending" | "sent" | "verified" | "failed";
+
+export interface FileStatus {
+  entry: ManifestEntry;
+  state: FileState;
+  transferred: bigint;
+}
+
 export interface SenderSnapshot {
   state: SenderState;
   shareUrl: string | null;
+  /** Overall progress across the whole batch. */
   progress: Progress;
+  files: FileStatus[];
+  /** Index into `files` currently on the wire, or -1. */
+  current: number;
+  totalBytes: bigint;
+  note: string;
   error: string | null;
-  fileName: string | null;
-  fileSize: bigint | null;
+  /** True while the user has paused the transfer by hand. */
+  paused: boolean;
 }
 
 /**
@@ -47,6 +67,49 @@ export interface SenderSnapshot {
  */
 const BUFFER_HIGH = 1024 * 1024;
 const BUFFER_LOW = 256 * 1024;
+
+/**
+ * A file plus where it sits in the batch.
+ *
+ * The relative path cannot be derived from a File: `webkitRelativePath` is set
+ * when a directory was chosen through an input, and is empty for a file that
+ * came from a drop or the clipboard, where the path has to be walked out of
+ * the DataTransfer entries instead. Carrying it alongside keeps both sources
+ * honest rather than having half the app quietly lose folder structure.
+ */
+export interface PickedFile {
+  file: File;
+  /** Relative directory inside the batch, "" for a file on its own. */
+  path: string;
+}
+
+/** Wrap files from an <input>, keeping any folder structure the browser gave. */
+export function pickedFromInput(files: ArrayLike<File>): PickedFile[] {
+  return Array.from(files).map((file) => {
+    const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath ?? "";
+    return {
+      file,
+      path: relative.includes("/") ? relative.slice(0, relative.lastIndexOf("/")) : "",
+    };
+  });
+}
+
+/**
+ * Turn picked files into manifest entries.
+ *
+ * Everything is sanitized here rather than only at the far end, so a hostile
+ * *local* name never reaches the wire in the first place.
+ */
+export function describeFiles(picked: PickedFile[]): ManifestEntry[] {
+  return picked.map(({ file, path }) => ({
+    fileId: crypto.randomUUID(),
+    name: sanitizeFilename(file.name),
+    path: sanitizePath(path),
+    size: BigInt(file.size),
+    mimeType: file.type || "application/octet-stream",
+    lastModified: file.lastModified,
+  }));
+}
 
 export class FileSender {
   private signaling: SignalingChannel | null = null;
@@ -60,19 +123,39 @@ export class FileSender {
   private shareUrl: string | null = null;
   private error: string | null = null;
   private cancelled = false;
-  private offer: FileOffer | null = null;
+
+  private manifest: Manifest | null = null;
+  private statuses: FileStatus[] = [];
+  private current = -1;
+  private sentTotal = 0n;
 
   /** True once both data channels are open and signaling stops mattering. */
   private linked = false;
 
   /** Set while the receiver's write backlog is too deep for more data. */
-  private paused = false;
+  private remotePaused = false;
+  /** Set while the user has paused by hand. */
+  private userPaused = false;
   private resumeWaiters: (() => void)[] = [];
 
+  private readonly picked: PickedFile[];
+  private readonly note: string;
+  private readonly totalBytes: bigint;
+
   constructor(
-    private readonly file: File,
+    picked: PickedFile[],
     private readonly onChange: (s: SenderSnapshot) => void,
-  ) {}
+    note = "",
+  ) {
+    this.picked = picked;
+    this.note = sanitizeNote(note);
+    this.totalBytes = picked.reduce((sum, p) => sum + BigInt(p.file.size), 0n);
+    this.statuses = describeFiles(picked).map((entry) => ({
+      entry,
+      state: "queued",
+      transferred: 0n,
+    }));
+  }
 
   private emit(state?: SenderState): void {
     if (state) this.state = state;
@@ -80,28 +163,54 @@ export class FileSender {
       state: this.state,
       shareUrl: this.shareUrl,
       progress: this.meter.snapshot(),
+      files: this.statuses,
+      current: this.current,
+      totalBytes: this.totalBytes,
+      note: this.note,
       error: this.error,
-      fileName: this.file.name,
-      fileSize: BigInt(this.file.size),
+      paused: this.userPaused,
     });
   }
 
   private fail(message: string): void {
     // Keep the first failure: later ones are usually consequences of it.
-    if (this.state === "failed") return;
+    //
+    // A finished transfer is equally immune. The receiver closes the peer
+    // connection the moment it has verified everything, which reaches us as
+    // connectionState "failed" a beat after TRANSFER_VERIFIED — and without
+    // this, a perfect transfer ends by replacing "Sent and verified" with
+    // "could not open a connection".
+    if (this.state === "failed" || this.state === "complete" || this.state === "declined") {
+      return;
+    }
     this.error = message;
+    if (this.current >= 0 && this.statuses[this.current]) {
+      this.statuses[this.current]!.state = "failed";
+    }
     this.emit("failed");
     this.cleanup();
   }
 
   /** Create the session and return the link to share. */
   async start(): Promise<void> {
-    if (BigInt(this.file.size) > MAX_TRANSFER_BYTES) {
-      this.fail(`That file is ${formatBytes(this.file.size)}. The limit is ${formatBytes(MAX_TRANSFER_BYTES)}.`);
+    if (this.picked.length === 0) {
+      this.fail("No files were chosen.");
       return;
     }
-    if (this.file.size === 0) {
-      this.fail("That file is empty.");
+    if (this.picked.length > MAX_FILES_PER_TRANSFER) {
+      this.fail(
+        `That is ${this.picked.length} files. One transfer carries at most ${MAX_FILES_PER_TRANSFER} — send them in batches.`,
+      );
+      return;
+    }
+    if (this.totalBytes > MAX_TRANSFER_BYTES) {
+      this.fail(
+        `That is ${formatBytes(this.totalBytes)} in total. The limit is ${formatBytes(MAX_TRANSFER_BYTES)}.`,
+      );
+      return;
+    }
+    if (this.totalBytes === 0n) {
+      this.fail(this.picked.length === 1 ? "That file is empty." : "Those files are all empty.");
       return;
     }
 
@@ -184,7 +293,7 @@ export class FileSender {
     if (this.pc) return; // a re-joined peer must not restart negotiation mid-flight
     this.emit("connecting");
 
-    const { pc, addRemoteCandidate, onRemoteDescriptionSet } = createPeerConnection(this.signaling!);
+    const { pc, addRemoteCandidate, onRemoteDescriptionSet } = await createPeerConnection(this.signaling!);
     this.pc = pc;
     this.addCandidate = addRemoteCandidate;
     this.remoteReady = onRemoteDescriptionSet;
@@ -192,14 +301,7 @@ export class FileSender {
     for (const c of this.earlyCandidates.splice(0)) addRemoteCandidate(c);
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed") {
-        this.fail(
-          "Could not open a direct connection. This is usually mobile data or a " +
-            "restrictive Wi-Fi — the quickest thing to try is putting both devices on " +
-            "the same Wi-Fi network. Getting through anyway needs a relay server, " +
-            "which is not configured.",
-        );
-      }
+      if (pc.connectionState === "failed") this.fail(unreachableMessage());
     };
 
     const { control, data } = createChannels(pc);
@@ -226,16 +328,14 @@ export class FileSender {
 
     sendControl(control, { type: "HELLO", protocolVersion: PROTOCOL_VERSION, role: "sender" });
 
-    this.offer = {
+    this.manifest = {
       transferId: crypto.randomUUID(),
-      fileId: crypto.randomUUID(),
-      name: this.file.name,
-      size: BigInt(this.file.size),
-      mimeType: this.file.type || "application/octet-stream",
-      lastModified: this.file.lastModified,
       chunkSize: negotiatedChunkSize(pc),
+      totalBytes: this.totalBytes,
+      files: this.statuses.map((s) => s.entry),
+      note: this.note,
     };
-    sendControl(control, offerToMessage(this.offer));
+    sendControl(control, manifestToMessage(this.manifest));
     this.emit("offering");
   }
 
@@ -256,31 +356,43 @@ export class FileSender {
           );
         }
         break;
-      case "FILE_ACCEPT":
-        await this.sendFile();
+
+      case "MANIFEST_ACCEPT":
+        await this.sendBatch();
         break;
 
       // The receiver's disk is often slower than the link. It tells us when
       // its write backlog is too deep, so the backlog does not turn into
       // memory on its side.
       case "PAUSE":
-        this.paused = true;
+        this.remotePaused = true;
         break;
 
       case "RESUME":
-        this.paused = false;
-        for (const wake of this.resumeWaiters.splice(0)) wake();
+        this.remotePaused = false;
+        this.wake();
         break;
 
-      // The transfer is only finished when the receiver has the file written
-      // and verified, not when we have pushed the last byte.
+      case "FILE_VERIFIED": {
+        const status = this.statuses.find((s) => s.entry.fileId === msg.fileId);
+        if (status) {
+          status.state = "verified";
+          this.emit();
+        }
+        break;
+      }
+
+      // The transfer is only finished when the receiver has every file
+      // written and verified, not when we have pushed the last byte.
       case "TRANSFER_VERIFIED":
         this.emit("complete");
         break;
-      case "FILE_REJECT":
+
+      case "MANIFEST_REJECT":
         this.emit("declined");
         this.cleanup();
         break;
+
       case "TRANSFER_FAILED":
         this.fail(msg.message || "The receiver reported a failure.");
         break;
@@ -288,33 +400,79 @@ export class FileSender {
   }
 
   /**
-   * The read loop. Memory stays flat because only one chunk is resident at a
-   * time and the loop blocks whenever the send buffer is full.
+   * The read loop, across the whole batch.
+   *
+   * Files stream back to back with no round trip between them: the receiver
+   * knows every size from the manifest, so it can route bytes by counting.
+   * Memory stays flat because only one chunk is resident at a time and the
+   * loop blocks whenever a buffer is full.
    */
-  private async sendFile(): Promise<void> {
+  private async sendBatch(): Promise<void> {
     const data = this.data;
-    const offer = this.offer;
-    if (!data || !offer) return;
+    const manifest = this.manifest;
+    if (!data || !manifest) return;
 
-    this.meter.start(BigInt(this.file.size));
+    this.meter.start(this.totalBytes);
     this.emit("transferring");
 
-    this.hasher = new StreamHasher();
-    await this.hasher.init();
-
     data.bufferedAmountLowThreshold = BUFFER_LOW;
-    sendControl(this.control!, { type: "TRANSFER_START", fileId: offer.fileId });
-
-    let offset = 0;
-    const total = this.file.size;
-    const chunkSize = offer.chunkSize;
+    sendControl(this.control!, { type: "TRANSFER_START", transferId: manifest.transferId });
 
     try {
-      while (offset < total) {
+      for (let i = 0; i < this.picked.length; i++) {
         if (this.cancelled) return;
+        this.current = i;
+        this.statuses[i]!.state = "sending";
+        await this.sendOne(this.picked[i]!.file, this.statuses[i]!, manifest.chunkSize, data);
+        this.statuses[i]!.state = "sent";
+        this.emit();
+      }
+
+      this.current = -1;
+      this.emit("verifying");
+
+      // The last send() only queues bytes; control and data are separate SCTP
+      // streams, so TRANSFER_COMPLETE would overtake whatever is still sitting
+      // in the data channel's buffer and the receiver would see a short file.
+      // Wait for the buffer to drain before announcing completion.
+      await this.flush(data);
+      sendControl(this.control!, { type: "TRANSFER_COMPLETE", transferId: manifest.transferId });
+
+      // Stay in "verifying" until TRANSFER_VERIFIED arrives. The receiver may
+      // still be writing a long backlog to disk, and telling the user it is
+      // done while the other side is mid-write is how someone closes the tab
+      // and ends up with an unopenable file.
+    } catch (err) {
+      sendControl(this.control!, {
+        type: "TRANSFER_FAILED",
+        transferId: manifest.transferId,
+        code: "send_failed",
+        message: "The sender could not finish the transfer.",
+      });
+      this.fail(err instanceof Error ? err.message : "The transfer failed.");
+    }
+  }
+
+  /** Stream one file and announce its digest. */
+  private async sendOne(
+    file: File,
+    status: FileStatus,
+    chunkSize: number,
+    data: RTCDataChannel,
+  ): Promise<void> {
+    const hasher = new StreamHasher();
+    this.hasher = hasher;
+    await hasher.init();
+
+    try {
+      let offset = 0;
+      const total = file.size;
+
+      while (offset < total) {
+        if (this.cancelled) throw new Error("The transfer was cancelled.");
         if (data.readyState !== "open") throw new Error("The connection dropped mid-transfer.");
 
-        if (this.paused) {
+        if (this.remotePaused || this.userPaused) {
           await this.waitForResume();
           continue;
         }
@@ -326,44 +484,26 @@ export class FileSender {
 
         const end = Math.min(offset + chunkSize, total);
         // slice() is lazy — this reads only these bytes, never the whole file.
-        const buf = await this.file.slice(offset, end).arrayBuffer();
+        const buf = await file.slice(offset, end).arrayBuffer();
+        const length = buf.byteLength;
 
         data.send(buf);
         // send() has copied the bytes, so the buffer is free to transfer to
         // the hashing worker, which detaches it.
-        await this.hasher.update(buf);
+        await hasher.update(buf);
 
         offset = end;
-        this.meter.set(BigInt(offset));
+        status.transferred = BigInt(offset);
+        this.sentTotal += BigInt(length);
+        this.meter.set(this.sentTotal);
         this.emit();
       }
 
-      this.emit("verifying");
-      const sha256 = await this.hasher.final();
-
-      // The last send() only queues bytes; control and data are separate SCTP
-      // streams, so TRANSFER_COMPLETE would overtake whatever is still sitting
-      // in the data channel's buffer and the receiver would see a short file.
-      // Wait for the buffer to drain before announcing completion.
-      await this.flush(data);
-
-      sendControl(this.control!, { type: "TRANSFER_COMPLETE", fileId: offer.fileId, sha256 });
-
-      // Stay in "verifying" until TRANSFER_VERIFIED arrives. The receiver may
-      // still be writing a long backlog to disk, and telling the user it is
-      // done while the other side is mid-write is how someone closes the tab
-      // and ends up with an unopenable file.
-    } catch (err) {
-      sendControl(this.control!, {
-        type: "TRANSFER_FAILED",
-        fileId: offer.fileId,
-        code: "send_failed",
-        message: "The sender could not finish the transfer.",
-      });
-      this.fail(err instanceof Error ? err.message : "The transfer failed.");
+      const sha256 = await hasher.final();
+      sendControl(this.control!, { type: "FILE_DONE", fileId: status.entry.fileId, sha256 });
     } finally {
-      this.hasher?.destroy();
-      this.hasher = null;
+      hasher.destroy();
+      if (this.hasher === hasher) this.hasher = null;
     }
   }
 
@@ -399,10 +539,15 @@ export class FileSender {
     });
   }
 
-  /** Block the read loop until the receiver says it has caught up. */
+  /** Block the read loop until whatever paused it lets go. */
   private waitForResume(): Promise<void> {
-    if (!this.paused) return Promise.resolve();
+    if (!this.remotePaused && !this.userPaused) return Promise.resolve();
     return new Promise((resolve) => this.resumeWaiters.push(resolve));
+  }
+
+  private wake(): void {
+    if (this.remotePaused || this.userPaused) return;
+    for (const resume of this.resumeWaiters.splice(0)) resume();
   }
 
   /** Wait for the send buffer to drain below the low-water mark. */
@@ -423,8 +568,30 @@ export class FileSender {
     });
   }
 
+  /**
+   * Hold the transfer without dropping the connection.
+   *
+   * Purely local: the read loop stops pulling bytes, the send buffer drains,
+   * and SCTP flow control does the rest. No protocol message is needed, and
+   * the peer connection stays up so resuming is instant.
+   */
+  pause(): void {
+    if (this.userPaused) return;
+    this.userPaused = true;
+    this.emit();
+  }
+
+  resume(): void {
+    if (!this.userPaused) return;
+    this.userPaused = false;
+    this.wake();
+    this.emit();
+  }
+
   cancel(): void {
     this.cancelled = true;
+    this.userPaused = false;
+    this.wake();
     this.cleanup();
   }
 

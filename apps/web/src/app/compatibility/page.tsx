@@ -12,6 +12,7 @@ export default function CompatibilityPage() {
 
   return (
     <Article
+      eyebrow="Where it runs"
       title="Compatibility"
       lede="Sending works almost anywhere. Receiving very large files does not, and the reason is worth understanding before you rely on it."
     >
@@ -20,13 +21,13 @@ export default function CompatibilityPage() {
           <Notice>Checking&hellip;</Notice>
         ) : disk ? (
           <Notice tone="good">
-            This browser can write incoming files straight to disk, so it can receive files up
-            to the full 100 GB limit.
+            This browser can write incoming files straight to disk, so it can receive transfers
+            up to the full 100 GB limit, folders included.
           </Notice>
         ) : (
           <Notice>
-            This browser cannot write incoming files directly to disk. It can still send files
-            of any size, and receive files up to {formatBytes(MEMORY_FALLBACK_LIMIT)}.
+            This browser cannot write incoming files directly to disk. It can still send any
+            size, and receive transfers up to {formatBytes(MEMORY_FALLBACK_LIMIT)} in total.
           </Notice>
         )}
       </Section>
@@ -49,12 +50,14 @@ export default function CompatibilityPage() {
           <strong className="font-medium text-ink">
             Chrome, Edge, Opera and other Chromium browsers on desktop
           </strong>{" "}
-          can receive files up to 100 GB.
+          can receive transfers up to 100 GB, and can be handed a folder to put a whole batch
+          into with one dialog.
         </p>
         <p>
           <strong className="font-medium text-ink">Firefox and Safari</strong> can send any
-          size, and receive up to {formatBytes(MEMORY_FALLBACK_LIMIT)}. Above that the page
-          declines the transfer instead of attempting it and crashing the tab.
+          size, and receive up to {formatBytes(MEMORY_FALLBACK_LIMIT)} in total. Above that the
+          page declines the transfer instead of attempting it and crashing the tab. A multi-file
+          transfer arrives as separate downloads rather than into a folder you choose.
         </p>
         <p>
           <strong className="font-medium text-ink">Mobile browsers</strong> can send and receive

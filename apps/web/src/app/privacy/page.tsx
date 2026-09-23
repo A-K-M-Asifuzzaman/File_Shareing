@@ -9,6 +9,7 @@ export const metadata: Metadata = {
 export default function PrivacyPage() {
   return (
     <Article
+      eyebrow="What we hold"
       title="Privacy"
       lede="The useful question is not what we promise not to do with your files. It is what we are able to do. The answer is nothing, because your files never reach us."
     >

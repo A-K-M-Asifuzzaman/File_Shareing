@@ -4,7 +4,79 @@
   Identity: a transmission instrument, not a storage product.
   One signal colour, reserved for things that are actually happening.
   Everything else is ink on a quiet ground, with generous space.
+
+  Two axes, kept independent:
+
+    data-theme   light | dark        (absent = follow the OS)
+    data-accent  the signal colour   (absent = signal)
+
+  The accent is the one colour the product spends, so which colour it is is a
+  preference rather than a redesign — the hierarchy, the spacing and the
+  restraint do not change with it.
+
+  Every accent declares both schemes' values in one place and the scheme picks
+  between them, so adding one is six lines rather than a new copy of the whole
+  palette. Values are hex on purpose: the WebGL field reads these tokens back
+  out of computed style and parses them, and a colour space it cannot parse
+  would silently fall back to a hardcoded lime.
 */
+
+/* -------------------------------------------------------------------------- */
+/* Accents                                                                    */
+/* -------------------------------------------------------------------------- */
+
+:root,
+[data-accent="signal"] {
+  /* Lime is unreadable on paper, so light mode carries a deep signal green. */
+  --a-light: #2c6b27;
+  --a-light-ink: #ffffff;
+  --a-light-wash: #e9f2e5;
+  --a-dark: #c8f04c;
+  --a-dark-ink: #0d1007;
+  --a-dark-wash: #1a220f;
+}
+
+[data-accent="ion"] {
+  --a-light: #0f6b78;
+  --a-light-ink: #ffffff;
+  --a-light-wash: #e0f0f2;
+  --a-dark: #5fe3f0;
+  --a-dark-ink: #04171a;
+  --a-dark-wash: #0e2225;
+}
+
+[data-accent="ember"] {
+  --a-light: #9a4a06;
+  --a-light-ink: #ffffff;
+  --a-light-wash: #fcece0;
+  --a-dark: #ffa552;
+  --a-dark-ink: #2a1403;
+  --a-dark-wash: #2a1a0c;
+}
+
+[data-accent="violet"] {
+  --a-light: #5b3ba8;
+  --a-light-ink: #ffffff;
+  --a-light-wash: #eee9fb;
+  --a-dark: #c3a6ff;
+  --a-dark-ink: #170b2e;
+  --a-dark-wash: #1c1430;
+}
+
+/* No accent at all: the instrument in monochrome. Everything still reads,
+   which is the test that the layout was never carrying colour. */
+[data-accent="bone"] {
+  --a-light: #3a3a3c;
+  --a-light-ink: #ffffff;
+  --a-light-wash: #ebeae7;
+  --a-dark: #e8e4da;
+  --a-dark-ink: #17181a;
+  --a-dark-wash: #232426;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Light — the default scheme                                                 */
+/* -------------------------------------------------------------------------- */
 
 :root {
   --ground: #f6f5f2;
@@ -16,18 +88,27 @@
   --ink: #14161a;
   --ink-soft: #565961;
   --ink-faint: #8b8e96;
-  /* Lime fails contrast on paper, so light mode uses a deep signal green. */
-  --signal: #2c6b27;
-  --signal-ink: #ffffff;
-  --signal-wash: #e9f2e5;
+
+  --signal: var(--a-light);
+  --signal-ink: var(--a-light-ink);
+  --signal-wash: var(--a-light-wash);
+
   --danger: #a2301c;
   --danger-wash: #fbebe9;
+  --warn: #8a5a08;
+  --warn-wash: #fdf3e0;
+
   --shadow: 0 1px 2px rgb(20 22 26 / 0.04), 0 8px 24px -12px rgb(20 22 26 / 0.12);
   --shadow-lift: 0 2px 4px rgb(20 22 26 / 0.05), 0 24px 48px -20px rgb(20 22 26 / 0.22);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Dark — written twice: once for the OS preference, once for an explicit      */
+/* choice. A single rule cannot express both without one overriding the other. */
+/* -------------------------------------------------------------------------- */
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --ground: #08090b;
     --ground-deep: #050608;
     --panel: #101216;
@@ -37,14 +118,43 @@
     --ink: #f2f3f1;
     --ink-soft: #9ba1a8;
     --ink-faint: #676d75;
-    --signal: #c8f04c;
-    --signal-ink: #0d1007;
-    --signal-wash: #1a220f;
+
+    --signal: var(--a-dark);
+    --signal-ink: var(--a-dark-ink);
+    --signal-wash: var(--a-dark-wash);
+
     --danger: #ff8a75;
     --danger-wash: #2b1613;
+    --warn: #f0c274;
+    --warn-wash: #2a2011;
+
     --shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 12px 32px -16px rgb(0 0 0 / 0.8);
     --shadow-lift: 0 2px 6px rgb(0 0 0 / 0.6), 0 32px 64px -24px rgb(0 0 0 / 0.9);
   }
+}
+
+:root[data-theme="dark"] {
+  --ground: #08090b;
+  --ground-deep: #050608;
+  --panel: #101216;
+  --panel-soft: #14171c;
+  --line: #22262c;
+  --line-strong: #2f343c;
+  --ink: #f2f3f1;
+  --ink-soft: #9ba1a8;
+  --ink-faint: #676d75;
+
+  --signal: var(--a-dark);
+  --signal-ink: var(--a-dark-ink);
+  --signal-wash: var(--a-dark-wash);
+
+  --danger: #ff8a75;
+  --danger-wash: #2b1613;
+  --warn: #f0c274;
+  --warn-wash: #2a2011;
+
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 12px 32px -16px rgb(0 0 0 / 0.8);
+  --shadow-lift: 0 2px 6px rgb(0 0 0 / 0.6), 0 32px 64px -24px rgb(0 0 0 / 0.9);
 }
 
 @theme inline {
@@ -62,8 +172,22 @@
   --color-signal-wash: var(--signal-wash);
   --color-danger: var(--danger);
   --color-danger-wash: var(--danger-wash);
+  --color-warn: var(--warn);
+  --color-warn-wash: var(--warn-wash);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+}
+
+html {
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme="light"]) {
+    color-scheme: dark;
+  }
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
 }
 
 body {
@@ -71,6 +195,17 @@ body {
   color: var(--ink);
   font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+  font-optical-sizing: auto;
+  /* Avoid the one-word last line that makes a paragraph look unfinished. */
+  text-wrap: pretty;
+}
+
+/* Headings break on sense rather than on width, so a two-line title does not
+   leave one orphaned word under seven others. */
+h1,
+h2,
+h3 {
+  text-wrap: balance;
 }
 
 /* Anything the machine measured — sizes, rates, hashes, links — is monospace. */
@@ -84,6 +219,7 @@ body {
   letter-spacing: -0.035em;
   line-height: 1.02;
   font-weight: 500;
+  text-wrap: balance;
 }
 
 .eyebrow {
@@ -138,6 +274,10 @@ body {
 }
 .breathing {
   animation: breathe 2.4s ease-in-out infinite;
+  /* Without fill-box, `center` resolves against the SVG viewport rather than
+     the circle itself, so the pulse scales away from the endpoint it is
+     supposed to be sitting on and renders beside it. */
+  transform-box: fill-box;
   transform-origin: center;
 }
 
@@ -217,12 +357,44 @@ body {
   animation: rise 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+/* A row arriving in a list that is already on screen. */
+@keyframes slot {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.slot {
+  animation: slot 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* The moment a file passes its checksum. Once, briefly, then gone. */
+@keyframes settle {
+  0%   { box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--signal) 70%, transparent); }
+  100% { box-shadow: inset 0 0 0 1px transparent; }
+}
+.settled {
+  animation: settle 1.2s ease-out both;
+}
+
+/* Drop target, while a file is over the window. */
+.armed {
+  outline: 2px dashed var(--signal);
+  outline-offset: -10px;
+}
+
 /* Every animation in here is decorative; none of it carries meaning that the
    text does not also carry. */
 @media (prefers-reduced-motion: reduce) {
+  .theming,
+  .theming *,
+  .theming *::before,
+  .theming *::after {
+    transition: none !important;
+  }
   .flowing,
   .breathing,
   .rise,
+  .slot,
+  .settled,
   .sweeping::after {
     animation: none;
   }
@@ -245,6 +417,27 @@ body {
   }
 }
 
+/*
+  Applied for a moment while the theme changes, then removed.
+
+  Every surface, rule and glyph swaps colour at once, and an instant swap reads
+  as a flicker rather than as a choice taking effect. A permanent transition on
+  colour would instead make every hover feel laggy, so it is worn only for the
+  length of the change.
+*/
+.theming,
+.theming *,
+.theming *::before,
+.theming *::after {
+  transition:
+    background-color 220ms ease,
+    border-color 220ms ease,
+    color 220ms ease,
+    fill 220ms ease,
+    stroke 220ms ease,
+    box-shadow 220ms ease !important;
+}
+
 ::selection {
   background: var(--signal);
   color: var(--signal-ink);
@@ -254,4 +447,67 @@ body {
   outline: 2px solid var(--signal);
   outline-offset: 3px;
   border-radius: 6px;
+}
+
+/*
+  A swatch paints itself in its own accent, in whichever scheme is live — so
+  the row of them previews what each choice would actually look like here,
+  rather than showing five colours from a mode nobody is in.
+
+  It reads --a-light / --a-dark from its own data-accent, which is why those
+  are declared on a plain attribute selector rather than only on :root.
+*/
+.swatch {
+  background: var(--a-light);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .swatch {
+    background: var(--a-dark);
+  }
+}
+:root[data-theme="dark"] .swatch {
+  background: var(--a-dark);
+}
+
+/*
+  The theme picker, in the top layer.
+
+  Native popover carries dismissal, Escape and focus handling, so none of that
+  is written here. Anchor positioning is not broadly supported yet, and the
+  trigger is pinned to the top right of a sticky header, so a fixed position is
+  both simpler and correct at every width.
+*/
+.picker {
+  position: fixed;
+  inset: auto 12px auto auto;
+  top: 64px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: visible;
+}
+.picker:popover-open {
+  animation: rise 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.picker::backdrop {
+  background: transparent;
+}
+@media (prefers-reduced-motion: reduce) {
+  .picker:popover-open {
+    animation: none;
+  }
+}
+
+/* Long file lists scroll inside their panel; keep that scrollbar quiet. */
+.quiet-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.quiet-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.quiet-scroll::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
 }

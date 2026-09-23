@@ -1,16 +1,24 @@
 import { Backlog } from "./backlog";
-import { createPeerConnection, sendControl } from "./connection";
+import { BatchCursor } from "./cursor";
+import { createPeerConnection, sendControl, unreachableMessage } from "./connection";
 import { StreamHasher } from "./hasher";
 import {
   PROTOCOL_VERSION,
   isControlMessage,
-  offerFromMessage,
+  manifestFromMessage,
   type ControlMessage,
-  type FileOffer,
+  type Manifest,
+  type ManifestEntry,
   type SignalMessage,
 } from "./protocol";
 import { ProgressMeter, type Progress } from "./progress";
-import { assessCapability, openSink, type Capability, type WriteSink } from "./sink";
+import {
+  assessCapability,
+  openDestination,
+  type Capability,
+  type Destination,
+  type WriteSink,
+} from "./sink";
 import { SignalingChannel } from "./signaling";
 
 export type ReceiverState =
@@ -25,29 +33,65 @@ export type ReceiverState =
   | "expired"
   | "failed";
 
+export type IncomingFileState = "queued" | "receiving" | "verified" | "failed";
+
+export interface IncomingFile {
+  entry: ManifestEntry;
+  state: IncomingFileState;
+  transferred: bigint;
+}
+
 export interface ReceiverSnapshot {
   state: ReceiverState;
-  offer: FileOffer | null;
+  manifest: Manifest | null;
+  files: IncomingFile[];
+  current: number;
   capability: Capability | null;
   progress: Progress;
   error: string | null;
   verified: boolean;
+  /** Where the files were written, once a destination is chosen. */
+  savedTo: string | null;
 }
 
 export class FileReceiver {
   private signaling: SignalingChannel | null = null;
   private pc: RTCPeerConnection | null = null;
   private control: RTCDataChannel | null = null;
+  private destination: Destination | null = null;
   private sink: WriteSink | null = null;
   private hasher: StreamHasher | null = null;
   private meter = new ProgressMeter();
 
   private state: ReceiverState = "connecting";
-  private offer: FileOffer | null = null;
+  private manifest: Manifest | null = null;
+  private statuses: IncomingFile[] = [];
   private capability: Capability | null = null;
   private error: string | null = null;
   private verified = false;
+  private savedTo: string | null = null;
+
+  /**
+   * Set the moment the batch is failed. `state` cannot stand in for this:
+   * fail() can land while finish() is awaiting the write queue, and a flag
+   * read after that await is the only thing that catches it.
+   */
+  private aborted = false;
+
+  /** Decides which file each wire byte belongs to; see cursor.ts. */
+  private cursor = new BatchCursor([]);
+  private index = 0;
   private received = 0n;
+
+  /**
+   * Digests announced by the sender, keyed by fileId.
+   *
+   * FILE_DONE travels on the control channel and can overtake the tail of its
+   * own file on the data channel, so it is parked here until our own byte
+   * count says that file is whole.
+   */
+  private digests = new Map<string, string>();
+  private digestWaiters = new Map<string, () => void>();
 
   /** True once the data channel is open and signaling stops mattering. */
   private linked = false;
@@ -79,19 +123,28 @@ export class FileReceiver {
     if (state) this.state = state;
     this.onChange({
       state: this.state,
-      offer: this.offer,
+      manifest: this.manifest,
+      files: this.statuses,
+      current: this.state === "receiving" ? this.index : -1,
       capability: this.capability,
       progress: this.meter.snapshot(),
       error: this.error,
       verified: this.verified,
+      savedTo: this.savedTo,
     });
   }
 
   private fail(message: string, state: ReceiverState = "failed"): void {
-    if (this.state === "failed") return;
+    // A finished transfer is immune: the sender tears the connection down
+    // once it has our TRANSFER_VERIFIED, and that must not turn a success
+    // into a connection error on this side either.
+    if (this.aborted || this.state === "complete" || this.state === "declined") return;
+    this.aborted = true;
     this.error = message;
+    if (this.statuses[this.index]) this.statuses[this.index]!.state = "failed";
     void this.sink?.abort();
     this.sink = null;
+    void this.destination?.finish(false);
     this.emit(state);
     this.cleanup();
   }
@@ -143,7 +196,7 @@ export class FileReceiver {
   private async answer(sdp: string): Promise<void> {
     if (this.pc) return;
 
-    const { pc, addRemoteCandidate, onRemoteDescriptionSet } = createPeerConnection(this.signaling!);
+    const { pc, addRemoteCandidate, onRemoteDescriptionSet } = await createPeerConnection(this.signaling!);
     this.pc = pc;
     this.addCandidate = addRemoteCandidate;
     this.remoteReady = onRemoteDescriptionSet;
@@ -152,14 +205,7 @@ export class FileReceiver {
     for (const c of this.earlyCandidates.splice(0)) addRemoteCandidate(c);
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed") {
-        this.fail(
-          "Could not open a direct connection to the sender. This is usually mobile " +
-            "data or a restrictive Wi-Fi — the quickest thing to try is putting both " +
-            "devices on the same Wi-Fi network. Getting through anyway needs a relay " +
-            "server, which is not configured.",
-        );
-      }
+      if (pc.connectionState === "failed") this.fail(unreachableMessage());
     };
 
     // The sender creates both channels; we attach as they arrive.
@@ -213,20 +259,31 @@ export class FileReceiver {
         }
         break;
 
-      case "FILE_OFFER":
+      case "MANIFEST":
         try {
-          this.offer = offerFromMessage(msg);
+          this.manifest = manifestFromMessage(msg);
         } catch (err) {
-          // A malformed offer means the far side is broken or hostile.
-          this.fail(err instanceof Error ? err.message : "The sender sent an invalid file offer.");
+          // A malformed manifest means the far side is broken or hostile.
+          this.fail(err instanceof Error ? err.message : "The sender sent an invalid file list.");
           return;
         }
-        this.capability = assessCapability(this.offer.size);
+        this.statuses = this.manifest.files.map((entry) => ({
+          entry,
+          state: "queued",
+          transferred: 0n,
+        }));
+        this.capability = assessCapability(this.manifest.totalBytes, this.manifest.files.length);
         this.emit("offered");
         break;
 
+      case "FILE_DONE":
+        this.digests.set(msg.fileId, msg.sha256);
+        this.digestWaiters.get(msg.fileId)?.();
+        this.digestWaiters.delete(msg.fileId);
+        break;
+
       case "TRANSFER_COMPLETE":
-        await this.finish(msg.sha256);
+        await this.finish();
         break;
 
       case "TRANSFER_FAILED":
@@ -238,37 +295,45 @@ export class FileReceiver {
   /**
    * Accept and start receiving.
    *
-   * Must be called directly from a click: the save dialog only opens inside a
-   * user gesture, and nothing may be awaited before it.
+   * Must be called directly from a click: the save and folder dialogs only
+   * open inside a user gesture, and nothing may be awaited before them.
    */
   async accept(): Promise<void> {
-    const offer = this.offer;
-    if (!offer || !this.control) return;
+    const manifest = this.manifest;
+    if (!manifest || !this.control) return;
 
     try {
-      this.sink = await openSink(offer.name, offer.mimeType, offer.size);
+      this.destination = await openDestination(manifest.files, manifest.totalBytes);
     } catch (err) {
-      // A cancelled save dialog is a decision, not a failure.
+      // A cancelled dialog is a decision, not a failure.
       if (err instanceof DOMException && err.name === "AbortError") return;
-      this.fail(err instanceof Error ? err.message : "Could not open a place to save the file.");
+      this.fail(err instanceof Error ? err.message : "Could not open a place to save the files.");
       return;
     }
 
-    this.hasher = new StreamHasher();
-    await this.hasher.init();
-
+    this.savedTo = this.destination.label;
     this.received = 0n;
-    this.meter.start(offer.size);
+    this.index = 0;
+    this.cursor = new BatchCursor(manifest.files.map((f) => f.size));
+
+    try {
+      await this.openCurrent();
+    } catch (err) {
+      this.fail(err instanceof Error ? err.message : "Could not open a place to save the files.");
+      return;
+    }
+
+    this.meter.start(manifest.totalBytes);
     this.emit("receiving");
 
-    sendControl(this.control, { type: "FILE_ACCEPT", fileId: offer.fileId });
+    sendControl(this.control, { type: "MANIFEST_ACCEPT", transferId: manifest.transferId });
   }
 
   decline(): void {
-    if (this.control && this.offer) {
+    if (this.control && this.manifest) {
       sendControl(this.control, {
-        type: "FILE_REJECT",
-        fileId: this.offer.fileId,
+        type: "MANIFEST_REJECT",
+        transferId: this.manifest.transferId,
         reason: "declined",
       });
     }
@@ -294,102 +359,198 @@ export class FileReceiver {
     // detaches it, and a detached buffer reports a length of zero.
     const size = chunk.byteLength;
 
-    if (this.backlog.arrived(size) && this.control && this.offer) {
-      sendControl(this.control, { type: "PAUSE", fileId: this.offer.fileId });
+    if (this.backlog.arrived(size) && this.control && this.manifest) {
+      sendControl(this.control, { type: "PAUSE", transferId: this.manifest.transferId });
     }
 
     this.writes = this.writes.then(async () => {
-      await this.writeChunk(chunk);
-      if (this.backlog.written(size) && this.control && this.offer) {
+      await this.consume(chunk);
+      if (this.backlog.written(size) && this.control && this.manifest) {
         sendControl(this.control, {
           type: "RESUME",
-          fileId: this.offer.fileId,
+          transferId: this.manifest.transferId,
           fromOffset: this.received.toString(),
         });
       }
     });
   }
 
-  private async writeChunk(chunk: ArrayBuffer): Promise<void> {
-    if (!this.sink || !this.hasher || !this.offer) return;
+  /**
+   * Route one wire chunk into one or more files.
+   *
+   * Files stream back to back with nothing between them, so a chunk can
+   * straddle a boundary. The manifest gives every size up front, which is
+   * what makes plain byte counting enough to know where each file ends — no
+   * per-chunk header, no round trip between files.
+   */
+  private async consume(chunk: ArrayBuffer): Promise<void> {
+    // Not a state check: finish() flips the state to "verifying" and only then
+    // awaits this queue, so anything still queued behind it would be dropped
+    // on the floor and the batch would report itself short. The tail of a
+    // transfer legitimately lands while the UI already says "verifying".
+    if (this.aborted || !this.destination) return;
 
-    const size = chunk.byteLength;
+    const { pieces, overflow } = this.cursor.split(chunk.byteLength);
 
-    // The sender is a stranger. Refuse more bytes than it said it would send
-    // rather than letting it write unbounded data to the user's disk.
-    if (this.received + BigInt(size) > this.offer.size) {
+    if (overflow > 0) {
+      // The sender is a stranger. Refuse more bytes than it said it would
+      // send rather than letting it write unbounded data to the user's disk.
       this.fail("The sender sent more data than it declared. Transfer aborted.");
       return;
     }
 
-    try {
-      await this.sink.write(chunk);
-      // write() has consumed the bytes, so the buffer can be transferred to
-      // the hashing worker, which detaches it.
-      await this.hasher.update(chunk);
-    } catch (err) {
-      this.fail(err instanceof Error ? err.message : "Could not write the file to disk.");
-      return;
-    }
+    for (const piece of pieces) {
+      const entry = this.manifest?.files[piece.index];
+      // `index` is which file the open sink belongs to; the cursor has already
+      // advanced past every piece in this chunk. If those ever disagree, the
+      // next bytes would be written into the wrong file and still pass that
+      // file's checksum, so this is checked rather than assumed.
+      if (!entry || !this.sink || !this.hasher || piece.index !== this.index) {
+        this.fail("The transfer arrived out of step with its file list. Transfer aborted.");
+        return;
+      }
 
-    this.received += BigInt(size);
-    this.meter.set(this.received);
-    this.emit();
+      // Whole chunk for one file is the common case: pass the buffer straight
+      // through so nothing is copied. A boundary-straddling chunk is sliced,
+      // which is a copy — but that happens once per file, not once per chunk.
+      const whole = piece.offset === 0 && piece.length === chunk.byteLength;
+      const bytes = whole ? chunk : chunk.slice(piece.offset, piece.offset + piece.length);
+
+      try {
+        await this.sink.write(bytes);
+        // write() has consumed the bytes, so the buffer can be transferred to
+        // the hashing worker, which detaches it.
+        await this.hasher.update(bytes);
+      } catch (err) {
+        this.fail(err instanceof Error ? err.message : "Could not write the file to disk.");
+        return;
+      }
+
+      this.received += BigInt(piece.length);
+      this.statuses[piece.index]!.transferred += BigInt(piece.length);
+      this.meter.set(this.received);
+
+      if (piece.endsFile) {
+        const ok = await this.closeCurrent(piece.index, entry);
+        if (!ok) return;
+      }
+      this.emit();
+    }
   }
 
-  private async finish(expectedSha256: string): Promise<void> {
+  /** Open the sink and hasher for the file at `index`. */
+  private async openCurrent(): Promise<void> {
+    const entry = this.manifest?.files[this.index];
+    if (!entry || !this.destination) return;
+
+    this.sink = await this.destination.open(entry);
+    this.hasher = new StreamHasher();
+    await this.hasher.init();
+    this.statuses[this.index]!.state = "receiving";
+  }
+
+  /**
+   * Finish the current file: check its digest, close it, move to the next.
+   *
+   * Returns false when the batch has been failed, so the caller stops.
+   */
+  private async closeCurrent(index: number, entry: ManifestEntry): Promise<boolean> {
+    const hasher = this.hasher;
+    const sink = this.sink;
+    if (!hasher || !sink) return false;
+
+    const actual = await hasher.final();
+    hasher.destroy();
+    this.hasher = null;
+
+    // The digest rides the control channel, which can lag the data channel's
+    // tail by a few milliseconds. Wait for it rather than guessing.
+    const expected = await this.digestFor(entry.fileId);
+
+    if (!expected || actual !== expected) {
+      await sink.abort();
+      this.sink = null;
+      this.fail(
+        `“${entry.name}” failed verification — the received bytes did not match the sender's checksum, ` +
+          `so the file was discarded. What is left where you chose to save it is empty, not a partial copy.`,
+      );
+      return false;
+    }
+
+    try {
+      await sink.close();
+    } catch (err) {
+      this.sink = null;
+      this.fail(err instanceof Error ? err.message : "Could not finish writing the file.");
+      return false;
+    }
+
+    this.sink = null;
+    this.statuses[index]!.state = "verified";
+    if (this.control) {
+      sendControl(this.control, { type: "FILE_VERIFIED", fileId: entry.fileId });
+    }
+
+    // The next file, not wherever the cursor has got to: the cursor is already
+    // past every piece in this chunk, and several small files can finish
+    // inside one of them.
+    this.index = index + 1;
+
+    if (this.index < (this.manifest?.files.length ?? 0)) {
+      try {
+        await this.openCurrent();
+      } catch (err) {
+        this.fail(err instanceof Error ? err.message : "Could not open the next file for writing.");
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** Resolve once the sender has announced this file's digest. */
+  private digestFor(fileId: string): Promise<string | undefined> {
+    const known = this.digests.get(fileId);
+    if (known) return Promise.resolve(known);
+    return new Promise((resolve) => {
+      this.digestWaiters.set(fileId, () => resolve(this.digests.get(fileId)));
+    });
+  }
+
+  private async finish(): Promise<void> {
+    if (this.aborted || this.verified) return;
     this.emit("verifying");
 
     // TRANSFER_COMPLETE can arrive while the last chunks are still being
-    // written, so let the queue drain before deciding the file is short.
+    // written, so let the queue drain before deciding the batch is short.
     await this.writes.catch(() => undefined);
 
-    if (!this.sink || !this.hasher || !this.offer) return;
+    if (this.aborted) return;
 
-    // A short file that claims completion is a failed transfer, not a
-    // successful one.
-    if (this.received !== this.offer.size) {
+    const manifest = this.manifest;
+    if (!manifest) return;
+
+    // A short transfer that claims completion is a failure, not a success.
+    if (this.received !== manifest.totalBytes) {
       sendControl(this.control!, {
         type: "TRANSFER_FAILED",
-        fileId: this.offer.fileId,
+        transferId: manifest.transferId,
         code: "short_read",
         message: "Receiver got fewer bytes than declared.",
       });
       this.fail(
-        "The transfer ended early, so the file is incomplete and was discarded. " +
-          "The file left where you chose to save it is empty — delete it and ask for a new link.",
+        "The transfer ended early, so the last file is incomplete and was discarded. " +
+          "Files that had already been verified are intact where you chose to save them.",
       );
       return;
     }
 
-    const actual = await this.hasher.final();
-    this.hasher.destroy();
-    this.hasher = null;
-
-    if (!expectedSha256 || actual !== expectedSha256) {
-      await this.sink.abort();
-      this.sink = null;
-      this.fail(
-        "File verification failed. The received file did not match the sender's checksum, " +
-          "so it was discarded — the file left where you chose to save it is empty, not a partial copy.",
-      );
-      return;
-    }
-
-    try {
-      await this.sink.close();
-    } catch (err) {
-      this.fail(err instanceof Error ? err.message : "Could not finish writing the file.");
-      return;
-    }
-
-    this.sink = null;
+    await this.destination?.finish(true);
     this.verified = true;
 
     // Tell the sender before tearing anything down, so it can stop showing
     // "sending" while we were finishing the write.
-    if (this.control && this.offer) {
-      sendControl(this.control, { type: "TRANSFER_VERIFIED", fileId: this.offer.fileId });
+    if (this.control) {
+      sendControl(this.control, { type: "TRANSFER_VERIFIED", transferId: manifest.transferId });
     }
 
     this.emit("complete");

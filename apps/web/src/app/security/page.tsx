@@ -9,6 +9,7 @@ export const metadata: Metadata = {
 export default function SecurityPage() {
   return (
     <Article
+      eyebrow="Threat model"
       title="Security"
       lede="How a transfer is protected, and — more usefully — what it does not protect you from."
     >

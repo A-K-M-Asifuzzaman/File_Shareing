@@ -129,10 +129,20 @@ function compile(gl: WebGLRenderingContext, type: number, src: string): WebGLSha
   return sh;
 }
 
+/**
+ * A theme token as linear 0–1 RGB.
+ *
+ * The tokens are hex on purpose — see globals.css. A custom property whose
+ * value is a var() reference computes to the substituted value, so reading
+ * --signal here yields the accent's hex rather than the reference, but both
+ * shorthand and full hex are accepted so a hand-edited token cannot quietly
+ * drop the backdrop back to a hardcoded colour.
+ */
 function cssRGB(el: HTMLElement, name: string): [number, number, number] {
   const raw = getComputedStyle(el).getPropertyValue(name).trim();
-  const hex = raw.replace("#", "");
-  if (hex.length !== 6) return [0.78, 0.94, 0.3];
+  let hex = raw.replace("#", "");
+  if (hex.length === 3) hex = [...hex].map((c) => c + c).join("");
+  if (!/^[0-9a-f]{6}$/i.test(hex)) return [0.78, 0.94, 0.3];
   return [
     parseInt(hex.slice(0, 2), 16) / 255,
     parseInt(hex.slice(2, 4), 16) / 255,
@@ -199,19 +209,33 @@ export function Field({
     };
 
     const root = document.documentElement;
-    let signal = cssRGB(root, "--signal");
-    let ink = cssRGB(root, "--ink");
-    let bg = cssRGB(root, "--ground-deep");
-    let dark = matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0;
-
     const scheme = matchMedia("(prefers-color-scheme: dark)");
-    const onScheme = () => {
+
+    let signal: [number, number, number] = [0.78, 0.94, 0.3];
+    let ink: [number, number, number] = [1, 1, 1];
+    let bg: [number, number, number] = [0, 0, 0];
+    let dark = 0;
+
+    /**
+     * Re-read the palette from the live tokens.
+     *
+     * Called for the OS preference changing and for either theme attribute
+     * changing, because the accent moves independently of the scheme — the
+     * field carries the signal colour, so an accent the backdrop ignored
+     * would be the most visible thing on the page still wearing the old one.
+     */
+    const readPalette = () => {
       signal = cssRGB(root, "--signal");
       ink = cssRGB(root, "--ink");
       bg = cssRGB(root, "--ground-deep");
-      dark = scheme.matches ? 1 : 0;
+      const chosen = root.dataset.theme;
+      dark = chosen === "dark" || (chosen !== "light" && scheme.matches) ? 1 : 0;
     };
-    scheme.addEventListener("change", onScheme);
+    readPalette();
+
+    scheme.addEventListener("change", readPalette);
+    const themeWatch = new MutationObserver(readPalette);
+    themeWatch.observe(root, { attributeFilter: ["data-theme", "data-accent"] });
 
     // Cap the pixel ratio: a full-screen fragment shader at 3x on a retina
     // display burns battery for detail nobody can see.
@@ -282,7 +306,8 @@ export function Field({
       cancelAnimationFrame(raf);
       ro.disconnect();
       io.disconnect();
-      scheme.removeEventListener("change", onScheme);
+      themeWatch.disconnect();
+      scheme.removeEventListener("change", readPalette);
       window.removeEventListener("pointermove", onMove);
       gl.getExtension("WEBGL_lose_context")?.loseContext();
     };

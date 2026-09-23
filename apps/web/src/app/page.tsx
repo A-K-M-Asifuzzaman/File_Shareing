@@ -3,21 +3,36 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Field } from "@/components/Field";
+import { History } from "@/components/History";
 import { Reveal } from "@/components/Reveal";
 import { ShareLink } from "@/components/Link";
+import { Qr } from "@/components/Qr";
 import {
+  BatchLine,
   Endpoints,
-  FileLine,
+  FileQueue,
   ForegroundHint,
   Notice,
+  PrimaryButton,
   ProgressReadout,
+  QuietButton,
   Working,
   type LinkPhase,
+  type QueueRow,
 } from "@/components/Transfer";
-import { FileSender, type SenderSnapshot } from "@/lib/transfer/sender";
+import { FileSender, pickedFromInput, type PickedFile, type SenderSnapshot } from "@/lib/transfer/sender";
+import { useClientValue } from "@/lib/useClientValue";
 import { useTransferGuards } from "@/lib/useTransferGuards";
-import { MAX_TRANSFER_BYTES, formatBytes } from "@/lib/transfer/protocol";
+import {
+  MAX_FILES_PER_TRANSFER,
+  MAX_TRANSFER_BYTES,
+  countFiles,
+  formatBytes,
+} from "@/lib/transfer/protocol";
 import { warmUp } from "@/lib/transfer/signaling";
+import { filesFromDataTransfer } from "@/lib/ui/dropped";
+import { record } from "@/lib/ui/history";
+import { askToNotify, notify } from "@/lib/ui/notify";
 
 const PHASE: Record<SenderSnapshot["state"], LinkPhase> = {
   idle: "idle",
@@ -33,9 +48,10 @@ const PHASE: Record<SenderSnapshot["state"], LinkPhase> = {
 };
 
 export default function SendPage() {
-  const [file, setFile] = useState<File | null>(null);
+  /** Chosen but not yet sent. A batch is assembled before it is committed. */
+  const [staged, setStaged] = useState<PickedFile[]>([]);
+  const [note, setNote] = useState("");
   const [snap, setSnap] = useState<SenderSnapshot | null>(null);
-  const [dragging, setDragging] = useState(false);
   const senderRef = useRef<FileSender | null>(null);
 
   // A transfer only exists while this tab is open; make that concrete by
@@ -46,17 +62,32 @@ export default function SendPage() {
   // to a file — the cold start then happens while they are still choosing.
   useEffect(() => warmUp(), []);
 
-  const begin = useCallback(async (picked: File) => {
-    setFile(picked);
-    const sender = new FileSender(picked, setSnap);
-    senderRef.current = sender;
-    await sender.start();
+  const add = useCallback((incoming: PickedFile[]) => {
+    if (incoming.length === 0) return;
+    setStaged((prev) => {
+      // Same file picked twice is a slip, not an instruction to send it twice.
+      const seen = new Set(prev.map(key));
+      return [...prev, ...incoming.filter((p) => !seen.has(key(p)))].slice(
+        0,
+        MAX_FILES_PER_TRANSFER,
+      );
+    });
   }, []);
+
+  const begin = useCallback(
+    async (picked: PickedFile[], text: string) => {
+      const sender = new FileSender(picked, setSnap, text);
+      senderRef.current = sender;
+      await sender.start();
+    },
+    [],
+  );
 
   function reset() {
     senderRef.current?.cancel();
     senderRef.current = null;
-    setFile(null);
+    setStaged([]);
+    setNote("");
     setSnap(null);
   }
 
@@ -65,6 +96,8 @@ export default function SendPage() {
 
   return (
     <>
+      <PageDrop onFiles={add} disabled={Boolean(snap)} />
+
       {/* The field reads the real transfer: it accelerates while bytes move
           and the corridor fills as progress does. */}
       <section className="relative isolate overflow-hidden border-b border-line">
@@ -76,33 +109,155 @@ export default function SendPage() {
         />
 
         <div className="mx-auto w-full max-w-6xl px-5 pt-16 pb-20 sm:pt-24 sm:pb-28">
-          {!file || !snap ? (
-            <Hero dragging={dragging} setDragging={setDragging} onPick={(f) => void begin(f)} />
-          ) : (
+          {snap ? (
             <div className="mx-auto w-full max-w-xl">
-              <SenderView snap={snap} onReset={reset} />
+              <SenderView
+                snap={snap}
+                onReset={reset}
+                onPause={() => senderRef.current?.pause()}
+                onResume={() => senderRef.current?.resume()}
+              />
             </div>
+          ) : (
+            <Hero
+              staged={staged}
+              note={note}
+              setNote={setNote}
+              onAdd={add}
+              onRemove={(id) => setStaged((prev) => prev.filter((p) => key(p) !== id))}
+              onClear={() => setStaged([])}
+              onSend={() => void begin(staged, note)}
+            />
           )}
         </div>
       </section>
 
+      {!snap && <History />}
       <Explainer />
     </>
   );
 }
 
+/** Stable identity for a picked file, for dedupe and for list keys. */
+function key(p: PickedFile): string {
+  return `${p.path}/${p.file.name}:${p.file.size}:${p.file.lastModified}`;
+}
+
+function rowsFor(staged: PickedFile[]): QueueRow[] {
+  return staged.map((p) => ({
+    id: key(p),
+    name: p.file.name,
+    path: p.path,
+    size: BigInt(p.file.size),
+    transferred: 0n,
+    state: "queued" as const,
+  }));
+}
+
+/* -------------------------------------------------------------------------- */
+/* Choosing                                                                   */
 /* -------------------------------------------------------------------------- */
 
-function Hero({
-  dragging,
-  setDragging,
-  onPick,
+/**
+ * Drag anywhere on the page, and paste.
+ *
+ * A drop target the size of one card is a thing to aim at; the window is not.
+ * Paste matters just as much — a screenshot lives on the clipboard and nowhere
+ * else until it is pasted somewhere, and making someone save it to disk first
+ * is pure friction.
+ */
+function PageDrop({
+  onFiles,
+  disabled,
 }: {
-  dragging: boolean;
-  setDragging: (v: boolean) => void;
-  onPick: (f: File) => void;
+  onFiles: (files: PickedFile[]) => void;
+  disabled: boolean;
 }) {
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [over, setOver] = useState(false);
+  // Drag events fire for every child element crossed, so a plain
+  // enter/leave pair flickers. Counting them is what makes it stable.
+  const depth = useRef(0);
+
+  useEffect(() => {
+    if (disabled) return;
+
+    const carriesFiles = (e: DragEvent) =>
+      Array.from(e.dataTransfer?.types ?? []).includes("Files");
+
+    const onEnter = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      depth.current++;
+      setOver(true);
+    };
+    const onOver = (e: DragEvent) => {
+      if (carriesFiles(e)) e.preventDefault();
+    };
+    const onLeave = () => {
+      depth.current = Math.max(0, depth.current - 1);
+      if (depth.current === 0) setOver(false);
+    };
+    const onDrop = (e: DragEvent) => {
+      if (!e.dataTransfer) return;
+      e.preventDefault();
+      depth.current = 0;
+      setOver(false);
+      void filesFromDataTransfer(e.dataTransfer).then(onFiles);
+    };
+    const onPaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      // Never steal a paste aimed at a text field.
+      if (target?.closest("input, textarea, [contenteditable]")) return;
+      const files = Array.from(e.clipboardData?.files ?? []);
+      if (files.length > 0) onFiles(pickedFromInput(files));
+    };
+
+    window.addEventListener("dragenter", onEnter);
+    window.addEventListener("dragover", onOver);
+    window.addEventListener("dragleave", onLeave);
+    window.addEventListener("drop", onDrop);
+    window.addEventListener("paste", onPaste);
+    return () => {
+      window.removeEventListener("dragenter", onEnter);
+      window.removeEventListener("dragover", onOver);
+      window.removeEventListener("dragleave", onLeave);
+      window.removeEventListener("drop", onDrop);
+      window.removeEventListener("paste", onPaste);
+    };
+  }, [onFiles, disabled]);
+
+  if (!over) return null;
+
+  return (
+    <div className="armed pointer-events-none fixed inset-0 z-[55] flex items-center justify-center bg-ground/70 backdrop-blur-sm">
+      <p className="rounded-xl border border-signal bg-panel px-5 py-3 text-[15px] shadow-[var(--shadow-lift)]">
+        Drop to add — files or whole folders
+      </p>
+    </div>
+  );
+}
+
+function Hero({
+  staged,
+  note,
+  setNote,
+  onAdd,
+  onRemove,
+  onClear,
+  onSend,
+}: {
+  staged: PickedFile[];
+  note: string;
+  setNote: (v: string) => void;
+  onAdd: (files: PickedFile[]) => void;
+  onRemove: (id: string) => void;
+  onClear: () => void;
+  onSend: () => void;
+}) {
+  const fileInput = useRef<HTMLInputElement>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
+
+  const total = staged.reduce((sum, p) => sum + BigInt(p.file.size), 0n);
+  const over = total > MAX_TRANSFER_BYTES;
 
   return (
     <div className="grid items-center gap-12 lg:grid-cols-[1.05fr_0.95fr] lg:gap-16">
@@ -110,7 +265,7 @@ function Hero({
         <p className="eyebrow">Peer to peer · nothing stored</p>
 
         <h1 className="display mt-5 text-[40px] sm:text-[56px] lg:text-[64px]">
-          Send a file straight
+          Send files straight
           <br />
           to someone else&rsquo;s
           <br />
@@ -118,15 +273,16 @@ function Hero({
         </h1>
 
         <p className="mt-6 max-w-md text-[16px] leading-relaxed text-ink-soft">
-          Choose a file and you get a link. Open it on the other side and the bytes travel
-          directly between the two browsers, encrypted, with no copy left on a server.
+          Choose files or a whole folder and you get one link. Open it on the other side and the
+          bytes travel directly between the two browsers, encrypted, with no copy left on a
+          server.
         </p>
 
         <dl className="mt-9 grid max-w-md grid-cols-3 gap-4">
           {[
             ["100 GB", "per transfer"],
             ["0 bytes", "kept by us"],
-            ["SHA-256", "verified"],
+            ["SHA-256", "every file"],
           ].map(([big, small]) => (
             <div key={big} className="flex flex-col gap-1">
               <dt className="tabular text-[17px] text-ink">{big}</dt>
@@ -136,70 +292,198 @@ function Hero({
         </dl>
       </div>
 
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragging(false);
-          const dropped = e.dataTransfer.files[0];
-          if (dropped) onPick(dropped);
-        }}
-        className={`glass rise relative rounded-2xl border p-8 shadow-[var(--shadow-lift)] transition-all duration-300 sm:p-10 ${
-          dragging ? "scale-[1.015] border-signal" : "border-line"
-        }`}
-        style={{ animationDelay: "120ms" }}
-      >
-        <Endpoints phase={dragging ? "waiting" : "idle"} />
+      <div className="glass rise relative rounded-2xl border border-line p-6 shadow-[var(--shadow-lift)] sm:p-8" style={{ animationDelay: "120ms" }}>
+        {staged.length === 0 ? (
+          <>
+            <Endpoints phase="idle" />
+            <div className="mt-7 flex flex-col items-center gap-3">
+              <PickButtons fileInput={fileInput} folderInput={folderInput} />
+              <p className="text-[13px] text-ink-faint">
+                or drop them anywhere on this page · up to {formatBytes(MAX_TRANSFER_BYTES)}
+              </p>
+            </div>
+            <p className="mt-7 border-t border-line pt-5 text-[12px] leading-relaxed text-ink-faint">
+              Keep this tab open while it transfers — the files are read from this device as they
+              send, so there is nothing to delete afterwards.
+            </p>
+          </>
+        ) : (
+          <>
+            <div className="flex items-baseline justify-between gap-4 border-b border-line pb-4">
+              <p className="text-[15px] font-medium tracking-tight">
+                {countFiles(staged.length)} ready
+              </p>
+              <p className="tabular text-[14px] text-ink-soft">{formatBytes(total)}</p>
+            </div>
 
-        <div className="mt-7 flex flex-col items-center gap-3">
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            className="group relative w-full overflow-hidden rounded-xl bg-signal px-6 py-4 text-[15px] font-medium text-signal-ink transition-transform duration-200 hover:scale-[1.02] active:scale-[0.99]"
-          >
-            Choose a file
-          </button>
+            <div className="mt-4">
+              <FileQueue rows={rowsFor(staged)} onRemove={onRemove} />
+            </div>
 
-          <p className="text-[13px] text-ink-faint">
-            or drop one here · up to {formatBytes(MAX_TRANSFER_BYTES)}
-          </p>
-        </div>
+            <label className="mt-4 block">
+              <span className="sr-only">A note to send with the files</span>
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                rows={2}
+                maxLength={2000}
+                placeholder="Add a note for them (optional)"
+                className="w-full resize-none rounded-xl border border-line bg-panel px-3.5 py-3 text-[13px] leading-relaxed placeholder:text-ink-faint focus-visible:border-signal"
+              />
+            </label>
+
+            {over && (
+              <div className="mt-4">
+                <Notice tone="error">
+                  That is {formatBytes(total)} in total, over the{" "}
+                  {formatBytes(MAX_TRANSFER_BYTES)} ceiling. Remove something, or send it in two
+                  goes.
+                </Notice>
+              </div>
+            )}
+
+            <div className="mt-5 flex flex-wrap items-center gap-2">
+              <PrimaryButton onClick={onSend} disabled={over}>
+                Create the link
+              </PrimaryButton>
+              <PickButtons fileInput={fileInput} folderInput={folderInput} compact />
+              <button
+                type="button"
+                onClick={onClear}
+                className="ml-auto text-[13px] text-ink-faint underline-offset-4 hover:text-ink-soft hover:underline"
+              >
+                Clear
+              </button>
+            </div>
+          </>
+        )}
 
         <input
-          ref={inputRef}
+          ref={fileInput}
           type="file"
+          multiple
           className="sr-only"
           onChange={(e) => {
-            const picked = e.target.files?.[0];
-            if (picked) onPick(picked);
+            if (e.target.files) onAdd(pickedFromInput(e.target.files));
+            e.target.value = ""; // so picking the same file again still fires
           }}
         />
-
-        <p className="mt-7 border-t border-line pt-5 text-[12px] leading-relaxed text-ink-faint">
-          Keep this tab open while it transfers — the file is read from this device as it sends,
-          so there is nothing to delete afterwards.
-        </p>
+        <input
+          ref={folderInput}
+          type="file"
+          multiple
+          // Not in React's typings; the attribute is what the browser reads.
+          {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+          className="sr-only"
+          onChange={(e) => {
+            if (e.target.files) onAdd(pickedFromInput(e.target.files));
+            e.target.value = "";
+          }}
+        />
       </div>
     </div>
   );
 }
 
+function PickButtons({
+  fileInput,
+  folderInput,
+  compact = false,
+}: {
+  fileInput: React.RefObject<HTMLInputElement | null>;
+  folderInput: React.RefObject<HTMLInputElement | null>;
+  compact?: boolean;
+}) {
+  if (compact) {
+    return (
+      <>
+        <QuietButton onClick={() => fileInput.current?.click()}>Add files</QuietButton>
+        <QuietButton onClick={() => folderInput.current?.click()}>Add a folder</QuietButton>
+      </>
+    );
+  }
+
+  return (
+    <div className="flex w-full flex-col gap-2 sm:flex-row">
+      <button
+        type="button"
+        onClick={() => fileInput.current?.click()}
+        className="flex-1 rounded-xl bg-signal px-6 py-4 text-[15px] font-medium text-signal-ink transition-transform duration-200 hover:scale-[1.02] active:scale-[0.99]"
+      >
+        Choose files
+      </button>
+      <button
+        type="button"
+        onClick={() => folderInput.current?.click()}
+        className="rounded-xl border border-line px-5 py-4 text-[15px] transition-colors duration-200 hover:border-line-strong hover:bg-ground-deep"
+      >
+        A folder
+      </button>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Sending                                                                    */
 /* -------------------------------------------------------------------------- */
 
-function SenderView({ snap, onReset }: { snap: SenderSnapshot; onReset: () => void }) {
+function SenderView({
+  snap,
+  onReset,
+  onPause,
+  onResume,
+}: {
+  snap: SenderSnapshot;
+  onReset: () => void;
+  onPause: () => void;
+  onResume: () => void;
+}) {
   const moving = snap.state === "transferring" || snap.state === "verifying";
-  useTransferGuards(moving);
+  useTransferGuards(moving && !snap.paused);
 
   const finished =
     snap.state === "complete" || snap.state === "failed" || snap.state === "declined";
 
+  // One history entry per transfer, written the moment it settles.
+  const logged = useRef(false);
+  useEffect(() => {
+    if (!finished || logged.current) return;
+    logged.current = true;
+
+    const outcome =
+      snap.state === "complete" ? "complete" : snap.state === "declined" ? "declined" : "failed";
+    record({
+      direction: "sent",
+      label: snap.files[0]?.entry.name ?? "transfer",
+      fileCount: snap.files.length,
+      bytes: snap.totalBytes.toString(),
+      outcome,
+      seconds: snap.progress.elapsedSeconds || null,
+    });
+
+    if (snap.state === "complete") {
+      notify("Transfer complete", `${countFiles(snap.files.length)} delivered and verified.`);
+    } else if (snap.state === "failed") {
+      notify("Transfer failed", snap.error ?? "The transfer did not finish.");
+    }
+  }, [finished, snap]);
+
+  const rows: QueueRow[] = snap.files.map((f) => ({
+    id: f.entry.fileId,
+    name: f.entry.name,
+    path: f.entry.path,
+    size: f.entry.size,
+    transferred: f.transferred,
+    state: f.state,
+  }));
+
+  const sharing =
+    (snap.state === "waiting" || snap.state === "connecting" || snap.state === "offering") &&
+    Boolean(snap.shareUrl);
+
   return (
     <div className="glass rise rounded-2xl border border-line p-6 shadow-[var(--shadow-lift)] sm:p-8">
-      <FileLine name={snap.fileName ?? ""} size={snap.fileSize ?? 0n} />
+      <BatchLine files={snap.files.map((f) => f.entry)} totalBytes={snap.totalBytes} />
 
       <div className="mt-7">
         <Endpoints phase={PHASE[snap.state]} from="This device" to="Them" />
@@ -213,58 +497,103 @@ function SenderView({ snap, onReset }: { snap: SenderSnapshot; onReset: () => vo
           />
         )}
 
-        {(snap.state === "waiting" || snap.state === "connecting" || snap.state === "offering") &&
-          snap.shareUrl && (
-            <>
-              <ShareLink url={snap.shareUrl} />
-              {snap.state === "connecting" ? (
-                <Working
-                  label="They opened the link. Making a direct connection…"
-                  patience="Still trying. Some networks block direct connections between devices — if it does not settle, one of you may need a different network."
-                />
-              ) : (
-                <Notice>
-                  {snap.state === "waiting"
-                    ? "Waiting for them to open the link. Keep this tab open — the file is sent from this device."
-                    : "Connected. Waiting for them to accept the file."}
-                </Notice>
-              )}
-            </>
-          )}
+        {sharing && snap.shareUrl && (
+          <>
+            <ShareLink url={snap.shareUrl} />
+            <div className="flex flex-col items-center gap-3 sm:flex-row sm:items-center sm:gap-5">
+              <Qr value={snap.shareUrl} />
+              <p className="text-[13px] leading-relaxed text-ink-soft">
+                Scan it to open the transfer on a phone. The code carries the whole link,
+                including the key after the <span className="tabular">#</span>.
+              </p>
+            </div>
+
+            {snap.state === "connecting" ? (
+              <Working
+                label="They opened the link. Making a direct connection…"
+                patience="Still trying. Some networks block direct connections between devices — if it does not settle, one of you may need a different network."
+              />
+            ) : (
+              <Notice>
+                {snap.state === "waiting"
+                  ? "Waiting for them to open the link. Keep this tab open — the files are sent from this device."
+                  : `Connected. Waiting for them to accept ${countFiles(snap.files.length)}.`}
+              </Notice>
+            )}
+          </>
+        )}
 
         {moving && <ForegroundHint />}
 
-        {(snap.state === "transferring" || snap.state === "verifying") && (
-          <ProgressReadout
-            progress={snap.progress}
-            label={
-              snap.state === "verifying"
-                ? "Sent — waiting for them to finish saving…"
-                : "Sending"
-            }
-          />
+        {moving && (
+          <>
+            <ProgressReadout
+              progress={snap.progress}
+              paused={snap.paused}
+              label={
+                snap.paused
+                  ? "Paused — the connection is still open"
+                  : snap.state === "verifying"
+                    ? "Sent — waiting for them to finish saving…"
+                    : `Sending ${snap.current >= 0 ? snap.files[snap.current]?.entry.name ?? "" : ""}`
+              }
+            />
+            <NotifyOffer />
+          </>
         )}
+
+        {snap.files.length > 1 && <FileQueue rows={rows} />}
 
         {snap.state === "complete" && (
           <Notice tone="good">
-            Sent and verified. The file reached their device intact and its checksum matches.
+            Sent and verified. {countFiles(snap.files.length)} reached their device intact, and
+            every checksum matched.
           </Notice>
         )}
 
-        {snap.state === "declined" && <Notice>They declined the file.</Notice>}
+        {snap.state === "declined" && <Notice>They declined the transfer.</Notice>}
         {snap.state === "failed" && <Notice tone="error">{snap.error}</Notice>}
 
-        <div>
+        <div className="flex flex-wrap gap-2">
+          {moving && (
+            <QuietButton onClick={snap.paused ? onResume : onPause}>
+              {snap.paused ? "Resume" : "Pause"}
+            </QuietButton>
+          )}
           <button
             type="button"
             onClick={onReset}
             className="rounded-xl border border-line px-5 py-3 text-[14px] transition-colors duration-200 hover:border-line-strong hover:bg-ground-deep"
           >
-            {finished ? "Send another file" : "Cancel transfer"}
+            {finished ? "Send something else" : "Cancel transfer"}
           </button>
         </div>
       </div>
     </div>
+  );
+}
+
+/** Offered once, mid-transfer, which is the only moment it makes sense. */
+function NotifyOffer() {
+  // Notification.permission does not exist while rendering on the server, and
+  // useClientValue is how the rest of this app reads a browser-only fact
+  // without a first-frame flash of the wrong thing.
+  const offerable = useClientValue(
+    () => typeof Notification !== "undefined" && Notification.permission === "default",
+  );
+  const [asked, setAsked] = useState(false);
+
+  if (!offerable || asked) return null;
+
+  return (
+    <button
+      type="button"
+      onClick={() => void askToNotify().then(() => setAsked(true))}
+      className="self-start rounded-xl border border-line bg-panel-soft px-4 py-3 text-left text-[13px] leading-relaxed text-ink-soft transition-colors hover:border-line-strong hover:text-ink"
+    >
+      This can take a while. <span className="text-ink underline underline-offset-4">Notify me</span>{" "}
+      when it finishes, so you can go and do something else.
+    </button>
   );
 }
 
@@ -274,7 +603,7 @@ const STEPS = [
   {
     n: "01",
     title: "Nothing uploads",
-    body: "The file stays on your disk. We read it in small pieces only as it sends, so picking a 60 GB file is instant.",
+    body: "The files stay on your disk. We read them in small pieces only as they send, so picking a 60 GB folder is instant.",
   },
   {
     n: "02",
@@ -283,8 +612,8 @@ const STEPS = [
   },
   {
     n: "03",
-    title: "Both ends check the result",
-    body: "Sender and receiver hash the file as it moves. A mismatch fails loudly rather than handing over a file that will not open.",
+    title: "Both ends check every file",
+    body: "Sender and receiver hash each file as it moves. A mismatch fails loudly rather than handing over a file that will not open.",
   },
 ];
 
@@ -294,7 +623,7 @@ function Explainer() {
       <Reveal>
         <p className="eyebrow">What actually happens</p>
         <h2 className="display mt-4 max-w-2xl text-[28px] sm:text-[36px]">
-          Most file sharing uploads your file to a company&rsquo;s servers. This does not.
+          Most file sharing uploads your files to a company&rsquo;s servers. This does not.
         </h2>
       </Reveal>
 
@@ -314,7 +643,7 @@ function Explainer() {
         <div className="mt-14 flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between">
           <p className="max-w-lg text-[14px] leading-relaxed text-ink-soft">
             The trade-off is real: both people have to be online at the same time. In exchange,
-            your file never sits on a stranger&rsquo;s hard drive.
+            your files never sit on a stranger&rsquo;s hard drive.
           </p>
           <Link
             href="/how-it-works"

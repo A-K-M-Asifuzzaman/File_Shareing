@@ -9,31 +9,59 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  MAX_FILES_PER_TRANSFER,
   MAX_TRANSFER_BYTES,
   formatBytes,
   formatDuration,
-  offerFromMessage,
-  offerToMessage,
+  manifestFromMessage,
+  manifestToMessage,
   parseByteCount,
   sanitizeFilename,
+  sanitizeNote,
+  sanitizePath,
   type ControlMessage,
+  type Manifest,
+  type ManifestEntry,
 } from "../src/lib/transfer/protocol.ts";
 import { ProgressMeter } from "../src/lib/transfer/progress.ts";
 import { Backlog } from "../src/lib/transfer/backlog.ts";
+import { BatchCursor } from "../src/lib/transfer/cursor.ts";
 
-test("byte counts survive the round trip at 100 GB", () => {
-  const offer = {
-    transferId: "t",
+/* -------------------------------------------------------------------------- */
+/* Fixtures                                                                   */
+/* -------------------------------------------------------------------------- */
+
+function entry(over: Partial<ManifestEntry> = {}): ManifestEntry {
+  return {
     fileId: "f",
     name: "big.iso",
-    size: 100_000_000_000n,
+    path: "",
+    size: 1024n,
     mimeType: "application/octet-stream",
     lastModified: 0,
-    chunkSize: 65536,
+    ...over,
   };
-  const wire = offerToMessage(offer);
-  assert.equal(typeof (wire as { size: string }).size, "string", "size must be a string on the wire");
-  assert.equal(offerFromMessage(wire).size, offer.size);
+}
+
+function manifest(files: ManifestEntry[], over: Partial<Manifest> = {}): Manifest {
+  return {
+    transferId: "t",
+    chunkSize: 65536,
+    totalBytes: files.reduce((sum, f) => sum + f.size, 0n),
+    files,
+    note: "",
+    ...over,
+  };
+}
+
+test("byte counts survive the round trip at 100 GB", () => {
+  const m = manifest([entry({ size: 100_000_000_000n })]);
+  const wire = manifestToMessage(m);
+
+  const files = (wire as { files: { size: unknown }[] }).files;
+  assert.equal(typeof files[0]!.size, "string", "size must be a string on the wire");
+  assert.equal(typeof (wire as { totalBytes: unknown }).totalBytes, "string");
+  assert.equal(manifestFromMessage(wire).files[0]!.size, 100_000_000_000n);
 });
 
 test("a size past 2^53 does not lose precision", () => {
@@ -85,51 +113,96 @@ test("ordinary filenames are left alone", () => {
   }
 });
 
-test("an offer above the limit is refused", () => {
-  const over: ControlMessage = {
-    type: "FILE_OFFER",
-    transferId: "t",
-    fileId: "f",
-    name: "too-big.bin",
-    size: (MAX_TRANSFER_BYTES + 1n).toString(),
-    mimeType: "",
-    lastModified: 0,
-    chunkSize: 65536,
-  };
-  assert.throws(() => offerFromMessage(over), /exceeds/);
+test("relative paths from a peer cannot climb out of the chosen folder", () => {
+  assert.equal(sanitizePath("photos/2024"), "photos/2024");
+  assert.equal(sanitizePath("photos\\2024"), "photos/2024");
+  assert.equal(sanitizePath(""), "");
 
-  const atLimit = { ...over, size: MAX_TRANSFER_BYTES.toString() };
-  assert.equal(offerFromMessage(atLimit).size, MAX_TRANSFER_BYTES);
+  // Every traversal attempt must collapse toward the chosen directory.
+  for (const evil of ["../..", "a/../../b", "/etc", "C:\\Windows", "\\\\server\\share", "..", "./.."]) {
+    const clean = sanitizePath(evil);
+    assert.ok(!clean.split("/").includes(".."), `traversal survived: ${clean}`);
+    assert.ok(!clean.startsWith("/"), `absolute path survived: ${clean}`);
+    assert.ok(
+      !clean.split("/").some((seg) => seg.startsWith(".")),
+      `hidden segment survived: ${clean}`,
+    );
+  }
+
+  // "a/../../b" keeps its real segments and drops the traversal ones, so it
+  // stays inside the folder rather than becoming a different file's path.
+  assert.equal(sanitizePath("a/../../b"), "a/b");
 });
 
-test("an offer with an absurd chunk size is refused", () => {
-  const base: ControlMessage = {
-    type: "FILE_OFFER",
-    transferId: "t",
-    fileId: "f",
-    name: "x.bin",
-    size: "1024",
-    mimeType: "",
-    lastModified: 0,
-    chunkSize: 65536,
-  };
+test("a path cannot be nested absurdly deep", () => {
+  const deep = Array.from({ length: 40 }, (_, i) => `d${i}`).join("/");
+  assert.equal(sanitizePath(deep).split("/").length, 16);
+});
+
+test("a note from a peer keeps its line breaks and loses its control codes", () => {
+  assert.equal(sanitizeNote("hi\nthere"), "hi\nthere");
+  assert.equal(sanitizeNote(`a${String.fromCharCode(0)}b${String.fromCharCode(7)}c`), "abc");
+  assert.equal(sanitizeNote(null), "");
+  assert.equal(sanitizeNote("x".repeat(5000)).length, 2000);
+});
+
+test("a manifest above the limit is refused", () => {
+  const over = manifestToMessage(manifest([entry({ size: MAX_TRANSFER_BYTES + 1n })]));
+  assert.throws(() => manifestFromMessage(over), /limit/);
+
+  const atLimit = manifestToMessage(manifest([entry({ size: MAX_TRANSFER_BYTES })]));
+  assert.equal(manifestFromMessage(atLimit).totalBytes, MAX_TRANSFER_BYTES);
+});
+
+test("the limit applies to the batch, not to each file", () => {
+  // Two files that each pass on their own but together do not.
+  const half = MAX_TRANSFER_BYTES / 2n + 1n;
+  const wire = manifestToMessage(
+    manifest([entry({ fileId: "a", size: half }), entry({ fileId: "b", size: half })]),
+  );
+  assert.throws(() => manifestFromMessage(wire), /limit/);
+});
+
+test("a manifest whose total disagrees with its files is refused", () => {
+  // A sender that understates the total would get the receiver to allocate
+  // and account for less than it is about to be sent.
+  const wire = manifestToMessage(manifest([entry({ size: 1000n })])) as Extract<
+    ControlMessage,
+    { type: "MANIFEST" }
+  >;
+  wire.totalBytes = "10";
+  assert.throws(() => manifestFromMessage(wire), /total/);
+});
+
+test("a manifest with an absurd chunk size is refused", () => {
   for (const chunkSize of [0, 512, 8 * 1024 * 1024, -1, 1.5]) {
-    assert.throws(() => offerFromMessage({ ...base, chunkSize }), /chunk size/);
+    const wire = manifestToMessage(manifest([entry()], { chunkSize }));
+    assert.throws(() => manifestFromMessage(wire), /chunk size/);
   }
 });
 
-test("an empty or negative file is refused", () => {
-  const base: ControlMessage = {
-    type: "FILE_OFFER",
-    transferId: "t",
-    fileId: "f",
-    name: "x.bin",
-    size: "0",
-    mimeType: "",
-    lastModified: 0,
-    chunkSize: 65536,
-  };
-  assert.throws(() => offerFromMessage(base), /positive/);
+test("an empty file list, an empty file, and too many files are all refused", () => {
+  assert.throws(() => manifestFromMessage(manifestToMessage(manifest([]))), /no files/);
+  assert.throws(() => manifestFromMessage(manifestToMessage(manifest([entry({ size: 0n })]))), /positive/);
+
+  const tooMany = Array.from({ length: MAX_FILES_PER_TRANSFER + 1 }, (_, i) =>
+    entry({ fileId: `f${i}`, size: 1n }),
+  );
+  assert.throws(() => manifestFromMessage(manifestToMessage(manifest(tooMany))), /at most/);
+});
+
+test("names and paths in a manifest are sanitized on arrival", () => {
+  const wire = manifestToMessage(
+    manifest([entry({ name: "../../etc/passwd", path: "../../root", size: 10n })]),
+  );
+  // Rewrite the wire fields directly: a hostile peer does not use our builder.
+  const hostile = wire as Extract<ControlMessage, { type: "MANIFEST" }>;
+  hostile.files[0]!.name = "../../etc/passwd";
+  hostile.files[0]!.path = "../../root";
+
+  const parsed = manifestFromMessage(hostile);
+  assert.equal(parsed.files[0]!.name, "passwd");
+  assert.equal(parsed.files[0]!.path, "root");
 });
 
 test("sizes display in decimal units, matching the stated limit", () => {
@@ -239,4 +312,101 @@ test("backlog measured with a detached buffer's length would wedge forever", () 
   // Passing the size captured on arrival is what actually frees it.
   b.written(500);
   assert.equal(b.written(500), true, "resumes once real sizes are used");
+});
+
+/* -------------------------------------------------------------------------- */
+/* Batch routing                                                              */
+/* -------------------------------------------------------------------------- */
+
+/** Rebuild what each file received, so a mis-split is visible as wrong bytes. */
+function drain(sizes: bigint[], chunks: number[]): { written: number[]; overflow: number } {
+  const cursor = new BatchCursor(sizes);
+  const written = sizes.map(() => 0);
+  let overflow = 0;
+
+  for (const length of chunks) {
+    const split = cursor.split(length);
+    overflow += split.overflow;
+    let covered = 0;
+    for (const piece of split.pieces) {
+      assert.equal(piece.offset, covered, "pieces must tile the chunk with no gap or overlap");
+      covered += piece.length;
+      written[piece.index]! += piece.length;
+    }
+    assert.equal(covered + split.overflow, length, "every wire byte must be accounted for");
+  }
+  return { written, overflow };
+}
+
+test("a single file takes whole chunks, as v1 did", () => {
+  const { written, overflow } = drain([200_000n], [65536, 65536, 65536, 3392]);
+  assert.deepEqual(written, [200_000]);
+  assert.equal(overflow, 0);
+});
+
+test("a chunk straddling a file boundary is split between the two files", () => {
+  // 100 bytes then 100 bytes, delivered as one 200-byte chunk.
+  const cursor = new BatchCursor([100n, 100n]);
+  const { pieces, overflow } = cursor.split(200);
+
+  assert.equal(overflow, 0);
+  assert.deepEqual(pieces, [
+    { index: 0, offset: 0, length: 100, endsFile: true },
+    { index: 1, offset: 100, length: 100, endsFile: true },
+  ]);
+  assert.equal(cursor.finished, true);
+});
+
+test("a chunk landing exactly on a boundary ends the file and starts no other", () => {
+  const cursor = new BatchCursor([100n, 100n]);
+  const { pieces } = cursor.split(100);
+  assert.deepEqual(pieces, [{ index: 0, offset: 0, length: 100, endsFile: true }]);
+  assert.equal(cursor.fileIndex, 1, "cursor has moved on");
+  assert.equal(cursor.receivedInFile, 0n, "and the next file starts empty");
+});
+
+test("many small files inside one chunk each get their own bytes", () => {
+  const sizes = Array.from({ length: 10 }, () => 10n);
+  const { written, overflow } = drain(sizes, [100]);
+  assert.deepEqual(written, Array.from({ length: 10 }, () => 10));
+  assert.equal(overflow, 0);
+});
+
+test("uneven chunks across uneven files still reassemble exactly", () => {
+  const sizes = [7n, 1n, 64_000n, 3n, 128_001n];
+  const total = Number(sizes.reduce((a, b) => a + b, 0n));
+
+  // Deliver it in 64 KB chunks with a ragged tail, as SCTP actually would.
+  const chunks: number[] = [];
+  for (let left = total; left > 0; left -= 65536) chunks.push(Math.min(65536, left));
+
+  const { written, overflow } = drain(sizes, chunks);
+  assert.deepEqual(written, sizes.map(Number));
+  assert.equal(overflow, 0);
+});
+
+test("bytes past the end of the last file are reported as overflow, not written", () => {
+  // The failure this guards: a hostile sender streaming past its declared
+  // sizes, which without this check writes unbounded data to the user's disk.
+  const cursor = new BatchCursor([100n]);
+  const { pieces, overflow } = cursor.split(150);
+
+  assert.deepEqual(pieces, [{ index: 0, offset: 0, length: 100, endsFile: true }]);
+  assert.equal(overflow, 50);
+
+  // Everything after that is overflow too — no piece escapes.
+  const after = cursor.split(64);
+  assert.deepEqual(after.pieces, []);
+  assert.equal(after.overflow, 64);
+});
+
+test("a cursor tracks the running total the checksum comparison relies on", () => {
+  const cursor = new BatchCursor([10n, 20n]);
+  cursor.split(15);
+  assert.equal(cursor.received, 15n);
+  assert.equal(cursor.fileIndex, 1);
+  assert.equal(cursor.receivedInFile, 5n);
+  cursor.split(15);
+  assert.equal(cursor.received, 30n);
+  assert.equal(cursor.finished, true);
 });

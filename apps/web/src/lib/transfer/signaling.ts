@@ -26,6 +26,21 @@ export function warmUp(): void {
   void prefetchIce();
 }
 
+/** Is the signaling service answering? Used by the diagnostics page. */
+export async function signalingHealth(): Promise<boolean> {
+  try {
+    const res = await fetch(`${SIGNALING_URL}/healthz`, { cache: "no-store" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Where the signaling service lives, for the diagnostics readout. */
+export function signalingOrigin(): string {
+  return SIGNALING_URL;
+}
+
 export interface IceConfig {
   iceServers: RTCIceServer[];
   relayAvailable: boolean;
@@ -50,9 +65,15 @@ let icePending: Promise<IceConfig> | null = null;
  */
 export function prefetchIce(): Promise<IceConfig> {
   icePending ??= fetch(`${SIGNALING_URL}/api/ice`)
-    .then((r) => (r.ok ? r.json() : FALLBACK_ICE))
-    .then((cfg: IceConfig) => {
-      if (Array.isArray(cfg?.iceServers) && cfg.iceServers.length > 0) iceCache = cfg;
+    .then(async (r) => {
+      if (!r.ok) throw new Error(`ice: ${r.status}`);
+      const cfg = (await r.json()) as IceConfig;
+      if (!Array.isArray(cfg?.iceServers)) throw new Error("ice: malformed");
+      // An empty list is an answer, not a failure: a deployment can
+      // deliberately run without STUN — on a LAN, or in a test — and quietly
+      // substituting a public server there would ignore its configuration and
+      // send every peer's address to a third party it did not ask for.
+      iceCache = cfg;
       return iceCache;
     })
     .catch(() => FALLBACK_ICE);
