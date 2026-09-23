@@ -15,10 +15,30 @@ import 'signaling.dart';
 
 /// ICE servers for a new connection, as reported by the signaling service —
 /// the only place TURN credentials can safely be minted.
-Map<String, dynamic> iceConfiguration() => {
-  'iceServers': currentIce().servers,
-  'sdpSemantics': 'unified-plan',
-};
+///
+/// Awaits the configuration rather than using whatever has arrived so far. The
+/// fetch starts at launch and is memoised, so this normally resolves at once —
+/// but the receiver builds its connection the moment the sender's offer lands,
+/// which can be sooner, and it would then negotiate against the STUN-only
+/// fallback: no relay for the peer most likely to need one.
+Future<Map<String, dynamic>> iceConfiguration() async {
+  final ice = await prefetchIce();
+  return {'iceServers': ice.servers, 'sdpSemantics': 'unified-plan'};
+}
+
+/// Whether a relay is available, so a failure can say the right thing.
+bool relayAvailable() => currentIce().relayAvailable;
+
+/// One message, so both peers explain a dead connection the same way.
+String unreachableMessage() => relayAvailable()
+    ? 'Could not open a connection, even through the relay. Both devices need '
+          'to stay online — if one is on a locked-down corporate or campus '
+          'network, try a different network.'
+    : 'Could not open a direct connection. This is usually mobile data or a '
+          'restrictive Wi-Fi — the quickest thing to try is putting both '
+          'devices on the same Wi-Fi network. Getting through anyway needs a '
+          'relay server, which is not configured.';
+
 
 /// Holds candidates that arrive before the remote description is set.
 ///

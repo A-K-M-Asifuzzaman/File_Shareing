@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:direct_protocol/direct_protocol.dart';
 import 'package:flutter/material.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 import 'theme.dart';
 
@@ -41,18 +42,26 @@ class _EndpointsState extends State<Endpoints>
 
   @override
   Widget build(BuildContext context) {
+    final p = Palette.of(context);
+    final caption = TextStyle(
+      fontSize: 11,
+      color: p.inkFaint,
+      letterSpacing: 1,
+    );
+
     return Column(
       children: [
         SizedBox(
           height: 44,
           child: AnimatedBuilder(
             animation: _c,
-            builder: (_, __) => CustomPaint(
+            builder: (_, _) => CustomPaint(
               painter: _EndpointsPainter(
                 t: _c.value,
                 live: widget.live,
                 done: widget.done,
                 error: widget.error,
+                palette: p,
               ),
               size: const Size(double.infinity, 44),
             ),
@@ -62,22 +71,8 @@ class _EndpointsState extends State<Endpoints>
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(
-              widget.from.toUpperCase(),
-              style: const TextStyle(
-                fontSize: 11,
-                color: Palette.inkFaint,
-                letterSpacing: 1,
-              ),
-            ),
-            Text(
-              widget.to.toUpperCase(),
-              style: const TextStyle(
-                fontSize: 11,
-                color: Palette.inkFaint,
-                letterSpacing: 1,
-              ),
-            ),
+            Text(widget.from.toUpperCase(), style: caption),
+            Text(widget.to.toUpperCase(), style: caption),
           ],
         ),
       ],
@@ -88,12 +83,14 @@ class _EndpointsState extends State<Endpoints>
 class _EndpointsPainter extends CustomPainter {
   final double t;
   final bool live, done, error;
+  final Palette palette;
 
   _EndpointsPainter({
     required this.t,
     required this.live,
     required this.done,
     required this.error,
+    required this.palette,
   });
 
   @override
@@ -103,10 +100,10 @@ class _EndpointsPainter extends CustomPainter {
     final right = Offset(size.width - 10, y);
 
     final pathColor = error
-        ? Palette.danger
+        ? palette.danger
         : (live || done)
-        ? Palette.signal
-        : Palette.lineStrong;
+        ? palette.signal
+        : palette.lineStrong;
 
     final track = Paint()
       ..color = pathColor.withValues(alpha: done ? 1 : 0.35)
@@ -116,7 +113,7 @@ class _EndpointsPainter extends CustomPainter {
 
     // Packets moving left to right while the transfer is live.
     if (live) {
-      final dot = Paint()..color = Palette.signal;
+      final dot = Paint()..color = palette.signal;
       final span = (right.dx - 14) - (left.dx + 14);
       for (var i = 0; i < 4; i++) {
         final p = ((t + i / 4) % 1.0);
@@ -124,16 +121,16 @@ class _EndpointsPainter extends CustomPainter {
       }
     }
 
-    canvas.drawCircle(left, 7, Paint()..color = Palette.ink);
+    canvas.drawCircle(left, 7, Paint()..color = palette.ink);
 
     if (done || live) {
-      canvas.drawCircle(right, 7, Paint()..color = Palette.signal);
+      canvas.drawCircle(right, 7, Paint()..color = palette.signal);
     } else {
       canvas.drawCircle(
         right,
         7,
         Paint()
-          ..color = Palette.inkFaint
+          ..color = palette.inkFaint
           ..style = PaintingStyle.stroke
           ..strokeWidth = 2,
       );
@@ -142,21 +139,91 @@ class _EndpointsPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_EndpointsPainter old) =>
-      old.t != t || old.live != live || old.done != done || old.error != error;
+      old.t != t ||
+      old.live != live ||
+      old.done != done ||
+      old.error != error ||
+      old.palette != palette;
+}
+
+/// Throughput over the last half-minute.
+///
+/// A single rate number cannot tell a steady 40 MB/s from one sawtoothing
+/// between 5 and 80, and on a long transfer that difference is what says
+/// whether the network is the problem. Scaled to its own peak, so it reads as
+/// shape rather than as a worse copy of the number above it.
+class Sparkline extends StatelessWidget {
+  final List<double> values;
+  const Sparkline({super.key, required this.values});
+
+  @override
+  Widget build(BuildContext context) {
+    if (values.length < 3) return const SizedBox(height: 34);
+    return SizedBox(
+      height: 34,
+      width: double.infinity,
+      child: CustomPaint(
+        painter: _SparklinePainter(values, Palette.of(context).signal),
+      ),
+    );
+  }
+}
+
+class _SparklinePainter extends CustomPainter {
+  final List<double> values;
+  final Color signal;
+  _SparklinePainter(this.values, this.signal);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final peak = values.reduce((a, b) => a > b ? a : b);
+    if (peak <= 0) return;
+
+    final step = size.width / (values.length - 1);
+    final path = Path();
+    for (var i = 0; i < values.length; i++) {
+      final x = i * step;
+      final y = size.height - (values[i] / peak) * (size.height - 2) - 1;
+      i == 0 ? path.moveTo(x, y) : path.lineTo(x, y);
+    }
+
+    final area = Path.from(path)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+    canvas.drawPath(area, Paint()..color = signal.withValues(alpha: 0.14));
+
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = signal
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5
+        ..strokeJoin = StrokeJoin.round
+        ..strokeCap = StrokeCap.round,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_SparklinePainter old) =>
+      old.values != values || old.signal != signal;
 }
 
 class ProgressReadout extends StatelessWidget {
   final Progress progress;
   final String label;
+  final bool paused;
 
   const ProgressReadout({
     super.key,
     required this.progress,
     required this.label,
+    this.paused = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    final p = Palette.of(context);
     final pct = (progress.fraction * 100).clamp(0, 100);
 
     return Column(
@@ -169,7 +236,7 @@ class ProgressReadout extends StatelessWidget {
             Expanded(
               child: Text(
                 label,
-                style: const TextStyle(fontSize: 14, color: Palette.inkSoft),
+                style: TextStyle(fontSize: 14, color: p.inkSoft),
               ),
             ),
             Text(
@@ -177,6 +244,7 @@ class ProgressReadout extends StatelessWidget {
               style: tabular.copyWith(
                 fontSize: 26,
                 fontWeight: FontWeight.w600,
+                color: p.ink,
               ),
             ),
           ],
@@ -187,23 +255,29 @@ class ProgressReadout extends StatelessWidget {
           child: LinearProgressIndicator(
             value: progress.fraction,
             minHeight: 8,
-            backgroundColor: Palette.line,
-            valueColor: const AlwaysStoppedAnimation(Palette.signal),
+            backgroundColor: p.line,
+            valueColor: AlwaysStoppedAnimation(p.signal),
           ),
         ),
-        const SizedBox(height: 18),
+        const SizedBox(height: 10),
+        Sparkline(values: progress.history),
+        const SizedBox(height: 8),
         Row(
           children: [
+            _Stat(label: 'Moved', value: formatBytes(progress.transferred)),
             _Stat(
-              label: 'Transferred',
-              value: formatBytes(progress.transferred),
+              label: 'Rate',
+              value: paused ? 'paused' : formatRate(progress.bytesPerSecond),
             ),
-            _Stat(label: 'Rate', value: formatRate(progress.bytesPerSecond)),
             _Stat(
               label: 'Remaining',
-              value: progress.etaSeconds == null
+              value: paused || progress.etaSeconds == null
                   ? '—'
                   : formatDuration(progress.etaSeconds!),
+            ),
+            _Stat(
+              label: 'Elapsed',
+              value: formatDuration(progress.elapsedSeconds),
             ),
           ],
         ),
@@ -218,24 +292,34 @@ class _Stat extends StatelessWidget {
   const _Stat({required this.label, required this.value});
 
   @override
-  Widget build(BuildContext context) => Expanded(
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label.toUpperCase(),
-          style: const TextStyle(
-            fontSize: 10,
-            color: Palette.inkFaint,
-            letterSpacing: 1.2,
+  Widget build(BuildContext context) {
+    final p = Palette.of(context);
+    return Expanded(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label.toUpperCase(),
+            style: TextStyle(
+              fontSize: 9.5,
+              color: p.inkFaint,
+              letterSpacing: 1.2,
+            ),
           ),
-        ),
-        const SizedBox(height: 4),
-        Text(value, style: tabular.copyWith(fontSize: 13, color: Palette.ink)),
-      ],
-    ),
-  );
+          const SizedBox(height: 4),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: tabular.copyWith(fontSize: 12.5, color: p.ink),
+          ),
+        ],
+      ),
+    );
+  }
 }
+
+enum NoticeTone { info, good, error, warn }
 
 class Notice extends StatelessWidget {
   final String text;
@@ -244,10 +328,12 @@ class Notice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = Palette.of(context);
     final (bg, border, fg) = switch (tone) {
-      NoticeTone.info => (Palette.panelSoft, Palette.line, Palette.inkSoft),
-      NoticeTone.good => (Palette.signalWash, Palette.signal, Palette.ink),
-      NoticeTone.error => (Palette.dangerWash, Palette.danger, Palette.danger),
+      NoticeTone.info => (p.panelSoft, p.line, p.inkSoft),
+      NoticeTone.good => (p.signalWash, p.signal, p.ink),
+      NoticeTone.warn => (p.warnWash, p.warn, p.warn),
+      NoticeTone.error => (p.dangerWash, p.danger, p.danger),
     };
 
     return Container(
@@ -266,55 +352,275 @@ class Notice extends StatelessWidget {
   }
 }
 
-enum NoticeTone { info, good, error }
-
 class Panel extends StatelessWidget {
   final Widget child;
   const Panel({super.key, required this.child});
 
   @override
-  Widget build(BuildContext context) => Container(
-    width: double.infinity,
-    padding: const EdgeInsets.all(20),
-    decoration: BoxDecoration(
-      color: Palette.panel,
-      border: Border.all(color: Palette.line),
-      borderRadius: BorderRadius.circular(18),
-    ),
-    child: child,
-  );
+  Widget build(BuildContext context) {
+    final p = Palette.of(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: p.panel,
+        border: Border.all(color: p.line),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: child,
+    );
+  }
 }
 
-class FileLine extends StatelessWidget {
+/// The headline for a batch: what it is, and how big.
+class BatchLine extends StatelessWidget {
   final String name;
-  final int size;
-  const FileLine({super.key, required this.name, required this.size});
+  final int others;
+  final int totalBytes;
+
+  const BatchLine({
+    super.key,
+    required this.name,
+    required this.totalBytes,
+    this.others = 0,
+  });
 
   @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
+  Widget build(BuildContext context) {
+    final p = Palette.of(context);
+    return Column(
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: Text.rich(
+                TextSpan(
+                  text: name,
+                  children: [
+                    if (others > 0)
+                      TextSpan(
+                        text: ' and $others more',
+                        style: TextStyle(color: p.inkFaint),
+                      ),
+                  ],
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              formatBytes(totalBytes),
+              style: tabular.copyWith(fontSize: 13, color: p.inkSoft),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        Divider(height: 1, color: p.line),
+      ],
+    );
+  }
+}
+
+/// One row of the per-file list.
+enum RowState { queued, active, done, failed }
+
+class QueueRow {
+  final String name;
+  final String path;
+  final int size;
+  final int transferred;
+  final RowState state;
+
+  const QueueRow({
+    required this.name,
+    required this.path,
+    required this.size,
+    required this.transferred,
+    required this.state,
+  });
+}
+
+/// Every file in the batch, with its own progress.
+///
+/// On a folder of two hundred files the overall bar says almost nothing —
+/// "which file is it stuck on" is the only question worth answering, and that
+/// needs the list. Scrolls inside its own box rather than pushing the
+/// controls off the screen.
+class FileQueue extends StatelessWidget {
+  final List<QueueRow> rows;
+  final void Function(int index)? onRemove;
+
+  const FileQueue({super.key, required this.rows, this.onRemove});
+
+  @override
+  Widget build(BuildContext context) {
+    if (rows.isEmpty) return const SizedBox.shrink();
+    final p = Palette.of(context);
+
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 260),
+      decoration: BoxDecoration(
+        color: p.panelSoft,
+        border: Border.all(color: p.line),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: ListView.separated(
+        shrinkWrap: true,
+        padding: EdgeInsets.zero,
+        itemCount: rows.length,
+        separatorBuilder: (_, _) => Divider(height: 1, color: p.line),
+        itemBuilder: (context, i) =>
+            _QueueRowView(row: rows[i], onRemove: onRemove == null ? null : () => onRemove!(i)),
+      ),
+    );
+  }
+}
+
+class _QueueRowView extends StatelessWidget {
+  final QueueRow row;
+  final VoidCallback? onRemove;
+
+  const _QueueRowView({required this.row, this.onRemove});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = Palette.of(context);
+    final active = row.state == RowState.active;
+    final pct = row.size <= 0 ? 0.0 : (row.transferred / row.size).clamp(0, 1);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      child: Row(
         children: [
+          _StateDot(state: row.state),
+          const SizedBox(width: 12),
           Expanded(
-            child: Text(
-              name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text.rich(
+                  TextSpan(
+                    children: [
+                      if (row.path.isNotEmpty)
+                        TextSpan(
+                          text: '${row.path}/',
+                          style: TextStyle(color: p.inkFaint),
+                        ),
+                      TextSpan(text: row.name),
+                    ],
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 13, color: p.ink),
+                ),
+                if (active) ...[
+                  const SizedBox(height: 6),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(999),
+                    child: LinearProgressIndicator(
+                      value: pct.toDouble(),
+                      minHeight: 3,
+                      backgroundColor: p.line,
+                      valueColor: AlwaysStoppedAnimation(p.signal),
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 10),
           Text(
-            formatBytes(size),
-            style: tabular.copyWith(fontSize: 13, color: Palette.inkSoft),
+            active
+                ? '${(pct * 100).toStringAsFixed(0)}%'
+                : formatBytes(row.size),
+            style: tabular.copyWith(fontSize: 11.5, color: p.inkFaint),
           ),
+          if (onRemove != null && row.state == RowState.queued)
+            IconButton(
+              onPressed: onRemove,
+              visualDensity: VisualDensity.compact,
+              iconSize: 16,
+              color: p.inkFaint,
+              icon: const Icon(Icons.close),
+              tooltip: 'Remove ${row.name}',
+            ),
         ],
       ),
-      const SizedBox(height: 16),
-      const Divider(height: 1, color: Palette.line),
-    ],
-  );
+    );
+  }
+}
+
+class _StateDot extends StatelessWidget {
+  final RowState state;
+  const _StateDot({required this.state});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = Palette.of(context);
+    return switch (state) {
+      RowState.done => Icon(Icons.check, size: 15, color: p.signal),
+      RowState.failed => Icon(Icons.close, size: 15, color: p.danger),
+      RowState.active => SizedBox(
+        width: 15,
+        height: 15,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: p.signal,
+        ),
+      ),
+      RowState.queued => Container(
+        width: 7,
+        height: 7,
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        decoration: BoxDecoration(
+          color: p.lineStrong,
+          shape: BoxShape.circle,
+        ),
+      ),
+    };
+  }
+}
+
+/// The share link as a QR code.
+///
+/// Typing a URL with a 64-character capability in its fragment is not a thing
+/// anyone will do, and the desktop-to-phone hand-off is the common case.
+class QrCard extends StatelessWidget {
+  final String url;
+  const QrCard({super.key, required this.url});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = Palette.of(context);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: p.panel,
+        border: Border.all(color: p.line),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: QrImageView(
+        data: url,
+        version: QrVersions.auto,
+        size: 168,
+        backgroundColor: Colors.transparent,
+        // Medium correction: still scans with a thumb over a corner, without
+        // the density that makes a long URL unreadable on a phone.
+        errorCorrectionLevel: QrErrorCorrectLevel.M,
+        eyeStyle: QrEyeStyle(eyeShape: QrEyeShape.square, color: p.ink),
+        dataModuleStyle: QrDataModuleStyle(
+          dataModuleShape: QrDataModuleShape.square,
+          color: p.ink,
+        ),
+      ),
+    );
+  }
 }
 
 /// Waiting on something with no measurable progress.
@@ -356,12 +662,13 @@ class _WorkingState extends State<Working> {
 
   @override
   Widget build(BuildContext context) {
+    final p = Palette.of(context);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
-        color: Palette.panelSoft,
-        border: Border.all(color: Palette.line),
+        color: p.panelSoft,
+        border: Border.all(color: p.line),
         borderRadius: BorderRadius.circular(14),
       ),
       child: Column(
@@ -369,19 +676,15 @@ class _WorkingState extends State<Working> {
         children: [
           Text(
             widget.label,
-            style: const TextStyle(
-              fontSize: 13.5,
-              height: 1.5,
-              color: Palette.inkSoft,
-            ),
+            style: TextStyle(fontSize: 13.5, height: 1.5, color: p.inkSoft),
           ),
           const SizedBox(height: 12),
           ClipRRect(
             borderRadius: BorderRadius.circular(999),
-            child: const LinearProgressIndicator(
+            child: LinearProgressIndicator(
               minHeight: 4,
-              backgroundColor: Palette.line,
-              valueColor: AlwaysStoppedAnimation(Palette.signal),
+              backgroundColor: p.line,
+              valueColor: AlwaysStoppedAnimation(p.signal),
             ),
           ),
           AnimatedCrossFade(
@@ -394,11 +697,7 @@ class _WorkingState extends State<Working> {
               padding: const EdgeInsets.only(top: 12),
               child: Text(
                 widget.patience ?? '',
-                style: const TextStyle(
-                  fontSize: 12,
-                  height: 1.5,
-                  color: Palette.inkFaint,
-                ),
+                style: TextStyle(fontSize: 12, height: 1.5, color: p.inkFaint),
               ),
             ),
           ),

@@ -6,6 +6,7 @@
 library;
 
 export 'src/backlog.dart';
+export 'src/cursor.dart';
 export 'src/progress.dart';
 export 'src/protocol.dart';
 export 'src/share_link.dart';

@@ -28,6 +28,12 @@ dependencies:
   path_provider: ^2.1.5
   permission_handler: ^11.3.1
 
+  # The share link as a QR code, so a desktop sender can hand off to a phone
+  # without anyone typing a 64-character capability. Pure Dart painting, no
+  # platform channel.
+  qr_flutter: ^4.1.0
+
+
   # Keeps the transfer running while the app is backgrounded. This is the
   # capability the web client cannot have.
   flutter_foreground_task: ^8.17.0

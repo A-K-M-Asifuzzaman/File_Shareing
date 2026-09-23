@@ -10,35 +10,87 @@ import 'peer.dart';
 
 import 'signaling.dart';
 
+/// A file chosen on this device, plus where it sits in the batch.
+class PickedFile {
+  final File file;
+
+  /// What to call it on the other side. The picker's name, not the path.
+  final String name;
+
+  /// Relative directory inside the batch, '' for a file on its own.
+  final String path;
+
+  /// Size at the moment it was picked.
+  ///
+  /// Carried rather than read on demand: the staging list rebuilds on every
+  /// keystroke in the note field, and stat-ing 500 files synchronously inside
+  /// build() would make the screen stutter for no reason. The sender still
+  /// re-reads the real length before it builds the manifest, so a file that
+  /// changed on disk in between cannot desync the wire format.
+  final int size;
+
+  const PickedFile({
+    required this.file,
+    required this.name,
+    required this.size,
+    this.path = '',
+  });
+}
+
+enum FileState { queued, sending, sent, verified, failed }
+
+class FileStatus {
+  final ManifestEntry entry;
+  FileState state;
+  int transferred;
+
+  FileStatus(this.entry, {this.state = FileState.queued, this.transferred = 0});
+}
+
 class SenderSnapshot {
   final TransferState state;
   final String? shareUrl;
+
+  /// Progress across the whole batch.
   final Progress progress;
+  final List<FileStatus> files;
+
+  /// Index into [files] currently on the wire, or -1.
+  final int current;
+  final int totalBytes;
+  final String note;
   final String? error;
-  final String fileName;
-  final int fileSize;
+
+  /// True while the user has paused the transfer by hand.
+  final bool paused;
 
   const SenderSnapshot({
     required this.state,
     required this.progress,
-    required this.fileName,
-    required this.fileSize,
+    required this.files,
+    required this.current,
+    required this.totalBytes,
+    this.note = '',
     this.shareUrl,
     this.error,
+    this.paused = false,
   });
+
+  /// The headline name: the first file, which the UI qualifies with a count.
+  String get label => files.isEmpty ? 'transfer' : files.first.entry.name;
 }
 
-/// Reads a file off this device and streams it to one peer.
+/// Reads files off this device and streams them to one peer.
 ///
-/// The read loop never holds more than one chunk, and stops entirely when
-/// either the local send buffer fills or the receiver says its disk is behind
-/// — the same two brakes the web sender uses.
+/// The read loop never holds more than one chunk, and stops entirely when the
+/// local send buffer fills, when the receiver says its disk is behind, or when
+/// the user pauses — the same brakes the web sender uses.
 class FileSender {
   static const int bufferHigh = 1024 * 1024;
   static const int bufferLow = 256 * 1024;
 
-  final File file;
-  final String displayName;
+  final List<PickedFile> picked;
+  final String note;
   final void Function(SenderSnapshot) onChange;
 
   SignalingChannel? _signaling;
@@ -46,24 +98,27 @@ class FileSender {
   RTCDataChannel? _control;
   RTCDataChannel? _data;
   CandidateBuffer? _candidates;
-  StreamHasher? _hasher;
-  FileOffer? _offer;
+  Manifest? _manifest;
 
   final ProgressMeter _meter = ProgressMeter();
+  final List<FileStatus> _statuses = [];
   TransferState _state = TransferState.idle;
   String? _shareUrl;
   String? _error;
-  int _size = 0;
+  int _totalBytes = 0;
+  int _current = -1;
+  int _sentTotal = 0;
 
   bool _linked = false;
   bool _cancelled = false;
   bool _remotePaused = false;
+  bool _userPaused = false;
   Completer<void>? _resume;
 
   FileSender({
-    required this.file,
-    required this.displayName,
+    required this.picked,
     required this.onChange,
+    this.note = '',
   });
 
   void _emit([TransferState? state]) {
@@ -73,27 +128,73 @@ class FileSender {
         state: _state,
         shareUrl: _shareUrl,
         progress: _meter.snapshot(),
+        files: List.unmodifiable(_statuses),
+        current: _current,
+        totalBytes: _totalBytes,
+        note: sanitizeNote(note),
         error: _error,
-        fileName: displayName,
-        fileSize: _size,
+        paused: _userPaused,
       ),
     );
   }
 
   void _fail(String message) {
-    if (_state == TransferState.failed) return; // keep the first cause
+    // Keep the first cause, and leave a finished transfer alone: the receiver
+    // closes the peer connection the moment it has verified everything, which
+    // arrives here as a failed connection state a beat after
+    // TRANSFER_VERIFIED. Without this a perfect transfer ends by replacing
+    // 'sent and verified' with 'could not open a connection'.
+    if (_state == TransferState.failed ||
+        _state == TransferState.complete ||
+        _state == TransferState.declined) {
+      return;
+    }
     _error = message;
+    if (_current >= 0 && _current < _statuses.length) {
+      _statuses[_current].state = FileState.failed;
+    }
     _emit(TransferState.failed);
     unawaited(dispose());
   }
 
   Future<void> start() async {
-    _size = await file.length();
-
-    if (_size <= 0) return _fail('That file is empty.');
-    if (_size > maxTransferBytes) {
+    if (picked.isEmpty) return _fail('No files were chosen.');
+    if (picked.length > maxFilesPerTransfer) {
       return _fail(
-        'That file is ${formatBytes(_size)}. The limit is '
+        'That is ${picked.length} files. One transfer carries at most '
+        '$maxFilesPerTransfer — send them in batches.',
+      );
+    }
+
+    // Sizes have to be read before anything else: they are what the manifest
+    // is, and the receiver routes bytes by them.
+    _statuses.clear();
+    _totalBytes = 0;
+    for (final p in picked) {
+      final size = await p.file.length();
+      _totalBytes += size;
+      _statuses.add(
+        FileStatus(
+          ManifestEntry(
+            fileId: _randomId(),
+            name: sanitizeFilename(p.name),
+            path: sanitizePath(p.path),
+            size: size,
+            mimeType: 'application/octet-stream',
+            lastModified: (await p.file.lastModified()).millisecondsSinceEpoch,
+          ),
+        ),
+      );
+    }
+
+    if (_totalBytes <= 0) {
+      return _fail(
+        picked.length == 1 ? 'That file is empty.' : 'Those files are all empty.',
+      );
+    }
+    if (_totalBytes > maxTransferBytes) {
+      return _fail(
+        'That is ${formatBytes(_totalBytes)} in total. The limit is '
         '${formatBytes(maxTransferBytes)}.',
       );
     }
@@ -161,7 +262,7 @@ class FileSender {
               _fail('The receiver left before the transfer started.');
             }
         }
-      } catch (e) {
+      } catch (_) {
         _fail('Connection negotiation failed.');
       }
     }());
@@ -171,7 +272,7 @@ class FileSender {
     if (_pc != null) return; // a re-join must not restart negotiation
     _emit(TransferState.connecting);
 
-    final pc = await createPeerConnection(iceConfiguration());
+    final pc = await createPeerConnection(await iceConfiguration());
     _pc = pc;
     _candidates = CandidateBuffer(pc);
 
@@ -179,12 +280,7 @@ class FileSender {
         _signaling?.send({'type': 'ice', 'candidate': candidateToJson(c)});
     pc.onConnectionState = (s) {
       if (s == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-        _fail(
-          'Could not open a direct connection. This is usually mobile data or '
-          'a restrictive Wi-Fi — the quickest thing to try is putting both '
-          'phones on the same Wi-Fi network. Getting through anyway needs a '
-          'relay server, which is not configured.',
-        );
+        _fail(unreachableMessage());
       }
     };
 
@@ -226,16 +322,14 @@ class FileSender {
       'role': 'sender',
     });
 
-    _offer = FileOffer(
+    _manifest = Manifest(
       transferId: _randomId(),
-      fileId: _randomId(),
-      name: sanitizeFilename(displayName),
-      size: _size,
-      mimeType: 'application/octet-stream',
-      lastModified: (await file.lastModified()).millisecondsSinceEpoch,
       chunkSize: defaultChunkSize,
+      totalBytes: _totalBytes,
+      files: _statuses.map((s) => s.entry).toList(),
+      note: sanitizeNote(note),
     );
-    sendControl(_control, _offer!.toMessage());
+    sendControl(_control, _manifest!.toMessage());
     _emit(TransferState.offering);
   }
 
@@ -252,20 +346,28 @@ class FileSender {
         if (msg['protocolVersion'] != protocolVersion) {
           _fail(
             'The other device speaks protocol v${msg['protocolVersion']}, '
-            'this one speaks v$protocolVersion.',
+            'this one speaks v$protocolVersion. One of you needs to update.',
           );
         }
-      case 'FILE_ACCEPT':
-        unawaited(_sendFile());
-      case 'FILE_REJECT':
+      case 'MANIFEST_ACCEPT':
+        unawaited(_sendBatch());
+      case 'MANIFEST_REJECT':
         _emit(TransferState.declined);
         unawaited(dispose());
       case 'PAUSE':
         _remotePaused = true;
       case 'RESUME':
         _remotePaused = false;
-        _resume?.complete();
-        _resume = null;
+        _wake();
+      case 'FILE_VERIFIED':
+        final id = msg['fileId'];
+        for (final s in _statuses) {
+          if (s.entry.fileId == id) {
+            s.state = FileState.verified;
+            _emit();
+            break;
+          }
+        }
       case 'TRANSFER_VERIFIED':
         _emit(TransferState.complete);
       case 'TRANSFER_FAILED':
@@ -275,59 +377,36 @@ class FileSender {
     }
   }
 
-  /// The read loop. Memory stays flat: one chunk at a time, and the loop
-  /// blocks whenever either side is behind.
-  Future<void> _sendFile() async {
+  /// The read loop, across the whole batch.
+  ///
+  /// Files stream back to back with no round trip between them: the receiver
+  /// knows every size from the manifest, so it routes bytes by counting.
+  /// Memory stays flat — one chunk at a time, and the loop blocks whenever
+  /// anything is behind.
+  Future<void> _sendBatch() async {
     final data = _data;
-    final offer = _offer;
-    if (data == null || offer == null) return;
+    final manifest = _manifest;
+    if (data == null || manifest == null) return;
 
-    _meter.start(_size);
+    _meter.start(_totalBytes);
     _emit(TransferState.transferring);
 
-    _hasher = StreamHasher();
-    sendControl(_control, {'type': 'TRANSFER_START', 'fileId': offer.fileId});
-
-    final handle = await file.open();
-    var offset = 0;
+    sendControl(_control, {
+      'type': 'TRANSFER_START',
+      'transferId': manifest.transferId,
+    });
 
     try {
-      while (offset < _size) {
+      for (var i = 0; i < picked.length; i++) {
         if (_cancelled) return;
-        if (data.state != RTCDataChannelState.RTCDataChannelOpen) {
-          throw Exception('The connection dropped mid-transfer.');
-        }
-
-        // The receiver's disk is behind; stop reading entirely.
-        if (_remotePaused) {
-          _resume ??= Completer<void>();
-          await _resume!.future.timeout(
-            const Duration(minutes: 10),
-            onTimeout: () =>
-                throw Exception('The receiver stopped responding.'),
-          );
-          continue;
-        }
-
-        // Our own send buffer is full; let it drain.
-        final buffered = data.bufferedAmount ?? 0;
-        if (buffered > bufferHigh) {
-          await Future<void>.delayed(const Duration(milliseconds: 20));
-          continue;
-        }
-
-        final want = min(offer.chunkSize, _size - offset);
-        final chunk = await handle.read(want);
-        if (chunk.isEmpty) break;
-
-        await data.send(RTCDataChannelMessage.fromBinary(chunk));
-        _hasher!.update(chunk);
-
-        offset += chunk.length;
-        _meter.set(offset);
+        _current = i;
+        _statuses[i].state = FileState.sending;
+        await _sendOne(picked[i].file, _statuses[i], manifest.chunkSize, data);
+        _statuses[i].state = FileState.sent;
         _emit();
       }
 
+      _current = -1;
       _emit(TransferState.verifying);
 
       // Control and data are separate SCTP streams, so TRANSFER_COMPLETE can
@@ -336,8 +415,7 @@ class FileSender {
 
       sendControl(_control, {
         'type': 'TRANSFER_COMPLETE',
-        'fileId': offer.fileId,
-        'sha256': _hasher!.finish(),
+        'transferId': manifest.transferId,
       });
       // Stays in verifying until TRANSFER_VERIFIED: the receiver may still be
       // writing, and claiming success early is how someone closes the app and
@@ -345,11 +423,69 @@ class FileSender {
     } catch (e) {
       sendControl(_control, {
         'type': 'TRANSFER_FAILED',
-        'fileId': offer.fileId,
+        'transferId': manifest.transferId,
         'code': 'send_failed',
         'message': 'The sender could not finish the transfer.',
       });
       _fail(e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
+  /// Stream one file and announce its digest.
+  Future<void> _sendOne(
+    File file,
+    FileStatus status,
+    int chunkSize,
+    RTCDataChannel data,
+  ) async {
+    final hasher = StreamHasher();
+    final handle = await file.open();
+    var offset = 0;
+    final size = status.entry.size;
+
+    try {
+      while (offset < size) {
+        if (_cancelled) throw Exception('The transfer was cancelled.');
+        if (data.state != RTCDataChannelState.RTCDataChannelOpen) {
+          throw Exception('The connection dropped mid-transfer.');
+        }
+
+        // The receiver's disk is behind, or the user pressed pause.
+        if (_remotePaused || _userPaused) {
+          _resume ??= Completer<void>();
+          await _resume!.future.timeout(
+            const Duration(minutes: 30),
+            onTimeout: () =>
+                throw Exception('The transfer stayed paused too long.'),
+          );
+          continue;
+        }
+
+        // Our own send buffer is full; let it drain.
+        if ((data.bufferedAmount ?? 0) > bufferHigh) {
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          continue;
+        }
+
+        final want = min(chunkSize, size - offset);
+        final chunk = await handle.read(want);
+        if (chunk.isEmpty) break;
+
+        await data.send(RTCDataChannelMessage.fromBinary(chunk));
+        hasher.update(chunk);
+
+        offset += chunk.length;
+        status.transferred = offset;
+        _sentTotal += chunk.length;
+        _meter.set(_sentTotal);
+        _emit();
+      }
+
+      sendControl(_control, {
+        'type': 'FILE_DONE',
+        'fileId': status.entry.fileId,
+        'sha256': hasher.finish(),
+      });
     } finally {
       await handle.close();
     }
@@ -358,8 +494,7 @@ class FileSender {
   Future<void> _flush(RTCDataChannel data) async {
     final deadline = DateTime.now().add(const Duration(minutes: 5));
     while (DateTime.now().isBefore(deadline)) {
-      final buffered = data.bufferedAmount ?? 0;
-      if (buffered == 0) return;
+      if ((data.bufferedAmount ?? 0) == 0) return;
       if (data.state != RTCDataChannelState.RTCDataChannelOpen) {
         throw Exception(
           'The connection dropped before the last bytes were sent.',
@@ -370,9 +505,35 @@ class FileSender {
     throw Exception('Timed out flushing the last bytes.');
   }
 
+  void _wake() {
+    if (_remotePaused || _userPaused) return;
+    _resume?.complete();
+    _resume = null;
+  }
+
+  /// Hold the transfer without dropping the connection.
+  ///
+  /// Purely local: the read loop stops pulling bytes, the send buffer drains,
+  /// and SCTP flow control does the rest. No protocol message is needed, and
+  /// the peer connection stays up so resuming is instant.
+  void pause() {
+    if (_userPaused) return;
+    _userPaused = true;
+    _emit();
+  }
+
+  void resume() {
+    if (!_userPaused) return;
+    _userPaused = false;
+    _wake();
+    _emit();
+  }
+
   void cancel() {
     _cancelled = true;
+    _userPaused = false;
     _resume?.complete();
+    _resume = null;
     unawaited(dispose());
   }
 
