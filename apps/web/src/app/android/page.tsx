@@ -48,17 +48,14 @@ const SHOTS = [
 
 const ADDS = [
   {
-    n: "01",
     title: "It survives the background",
     body: "A foreground service holds the transfer open when you leave the app, with progress in the notification. A browser tab cannot promise that — leave it and the transfer dies with it.",
   },
   {
-    n: "02",
     title: "Links open the app",
     body: "A share link sent in a chat is claimed by the app rather than the browser, verified against this domain. The offer arrives on the phone straight from the tap.",
   },
   {
-    n: "03",
     title: "Written as they arrive",
     body: "Files are written to the app's storage in 64 KB pieces as they come in, never held whole in memory, with folder structure preserved and each one checked against the sender's SHA-256 before it gets its real name.",
   },
@@ -105,9 +102,8 @@ export default function AndroidPage() {
         <p className="eyebrow">What the app adds</p>
         <div className="mt-6 grid gap-px overflow-hidden rounded-2xl border border-line bg-line sm:grid-cols-3">
           {ADDS.map((item) => (
-            <div key={item.n} className="h-full bg-panel p-7">
-              <p className="tabular text-[12px] text-signal">{item.n}</p>
-              <h2 className="mt-4 text-[17px] font-medium tracking-tight">{item.title}</h2>
+            <div key={item.title} className="h-full bg-panel p-7">
+              <h2 className="text-[17px] font-medium tracking-tight">{item.title}</h2>
               <p className="mt-3 text-[14px] leading-relaxed text-ink-soft">{item.body}</p>
             </div>
           ))}

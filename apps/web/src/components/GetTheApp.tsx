@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useClientValue } from "@/lib/useClientValue";
 
 const DISMISSED = "direct.app-pill.dismissed";
@@ -35,6 +35,17 @@ export function GetTheApp() {
   const dismissed = useClientValue(wasDismissed);
   const [closed, setClosed] = useState(false);
 
+  // Held back until the hero has been scrolled past. On a phone the pill
+  // would otherwise sit directly on top of "Choose files", which is the one
+  // thing the page exists to offer.
+  const [past, setPast] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setPast(window.scrollY > 320);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
   function dismiss() {
     setClosed(true);
     try {
@@ -44,7 +55,7 @@ export function GetTheApp() {
     }
   }
 
-  if (dismissed !== false || closed) return null;
+  if (dismissed !== false || closed || !past) return null;
   if (pathname === "/android" || pathname.startsWith("/t/")) return null;
 
   return (
