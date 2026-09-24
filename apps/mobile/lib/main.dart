@@ -996,10 +996,8 @@ class _ReceiverView extends StatelessWidget {
             ],
             Notice(
               '${countFiles(manifest.files.length)} — '
-              // Not the shared Downloads folder: the destination is this app's
-              // own storage, and the completed screen prints the real path.
               '${formatBytes(manifest.totalBytes)} — transfer directly from '
-              "their device. They will be saved to this app's downloads.",
+              'their device. They will be saved to your Downloads folder.',
             ),
             const SizedBox(height: 14),
             if (manifest.files.length > 1) ...[

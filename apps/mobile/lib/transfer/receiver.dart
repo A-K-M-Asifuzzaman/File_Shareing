@@ -5,6 +5,7 @@ import 'dart:io';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import 'downloads.dart';
 import 'peer.dart';
 
 import 'signaling.dart';
@@ -93,6 +94,10 @@ class FileReceiver {
   final List<IncomingFile> _statuses = [];
   String? _error;
   String? _savedTo;
+
+  /// Where verified files were moved to, for the person to go and look. Null
+  /// until the first file lands, and never used as a path to write to.
+  String? _publishedTo;
   bool _verified = false;
   bool _linked = false;
   int _index = 0;
@@ -119,7 +124,7 @@ class FileReceiver {
         current: _state == TransferState.transferring ? _index : -1,
         progress: _meter.snapshot(),
         error: _error,
-        savedTo: _savedTo,
+        savedTo: _publishedTo ?? _savedTo,
         verified: _verified,
       ),
     );
@@ -489,6 +494,23 @@ class FileReceiver {
       _sink = null;
       _fail('Could not finish writing the file.');
       return false;
+    }
+
+    // Verified, so it can leave the app's own storage for somewhere the phone
+    // will actually show it. A failure here is not a failed transfer: the
+    // bytes are correct and still on disk, so the path we report just stays
+    // the private one rather than the transfer being thrown away.
+    try {
+      final landed = await Downloads.publish(
+        File(_target!.path),
+        name: entry.name,
+        subPath: entry.path,
+      );
+      // Where it is reported, never where the next file is written: _savedTo
+      // stays the working directory this batch streams into.
+      if (landed != null) _publishedTo = landed;
+    } catch (_) {
+      /* keep the file, keep the private path */
     }
 
     _statuses[index].state = IncomingState.verified;

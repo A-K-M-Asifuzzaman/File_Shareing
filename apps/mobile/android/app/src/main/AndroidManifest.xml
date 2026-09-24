@@ -21,6 +21,13 @@
          but its progress notification is silently hidden. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
+    <!-- Only for putting finished files in Downloads before scoped storage.
+         From Android 10 that goes through MediaStore, which needs no
+         permission at all, so this is capped rather than asked for. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28"/>
+
     <application
         android:label="Direct"
         android:name="${applicationName}"

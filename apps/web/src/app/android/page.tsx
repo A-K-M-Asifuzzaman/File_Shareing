@@ -56,8 +56,8 @@ const ADDS = [
     body: "A share link sent in a chat is claimed by the app rather than the browser, verified against this domain. The offer arrives on the phone straight from the tap.",
   },
   {
-    title: "Written as they arrive",
-    body: "Files are written to the app's storage in 64 KB pieces as they come in, never held whole in memory, with folder structure preserved and each one checked against the sender's SHA-256 before it gets its real name.",
+    title: "Files land in Downloads",
+    body: "Bytes are written in 64 KB pieces as they arrive, never held whole in memory. Each file moves into the phone's Downloads only once its SHA-256 matches, so a half-received file never appears there under a name that suggests it is ready.",
   },
 ];
 
