@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Bricolage_Grotesque, Geist, Geist_Mono } from "next/font/google";
+import { GetTheApp } from "@/components/GetTheApp";
 import { ThemeColor } from "@/components/ThemeColor";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { THEME_SCRIPT } from "@/lib/ui/theme";
@@ -8,6 +9,15 @@ import "./globals.css";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
+
+// Headlines only. Bricolage's slightly narrow, slightly irregular shapes give
+// the page a voice; Geist stays for anything you actually have to read at
+// 13–16px, where character is a liability.
+const bricolage = Bricolage_Grotesque({
+  variable: "--font-bricolage",
+  subsets: ["latin"],
+  weight: ["500", "600", "700"],
+});
 
 export const metadata: Metadata = {
   title: {
@@ -29,6 +39,7 @@ export const metadata: Metadata = {
 
 const NAV = [
   { href: "/how-it-works", label: "How it works" },
+  { href: "/android", label: "Android" },
   { href: "/security", label: "Security" },
   { href: "/diagnostics", label: "Diagnostics" },
   { href: "/privacy", label: "Privacy" },
@@ -39,7 +50,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} ${bricolage.variable} h-full antialiased`}
       suppressHydrationWarning
     >
       <head>
@@ -90,6 +101,8 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <main id="main" className="flex-1">
           {children}
         </main>
+
+        <GetTheApp />
 
         <footer className="border-t border-line">
           <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-5 py-8 sm:flex-row sm:items-center sm:justify-between">

@@ -102,6 +102,14 @@
   --shadow-lift: 0 2px 4px rgb(20 22 26 / 0.05), 0 24px 48px -20px rgb(20 22 26 / 0.22);
 }
 
+/* Hairlines and quiet text *inside* the accent-filled hero, where --line and
+   --ink-soft are both invisible. Derived from the fill's own ink so they hold
+   for every accent and both schemes without a table of exceptions. */
+:root {
+  --signal-edge: color-mix(in oklab, var(--signal-ink) 22%, transparent);
+  --signal-ink-soft: color-mix(in oklab, var(--signal-ink) 72%, var(--signal));
+}
+
 /* -------------------------------------------------------------------------- */
 /* Dark — written twice: once for the OS preference, once for an explicit      */
 /* choice. A single rule cannot express both without one overriding the other. */
@@ -170,12 +178,18 @@
   --color-signal: var(--signal);
   --color-signal-ink: var(--signal-ink);
   --color-signal-wash: var(--signal-wash);
+  --color-signal-edge: var(--signal-edge);
+  --color-signal-ink-soft: var(--signal-ink-soft);
   --color-danger: var(--danger);
   --color-danger-wash: var(--danger-wash);
   --color-warn: var(--warn);
   --color-warn-wash: var(--warn-wash);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-bricolage);
+
+  --radius-panel: 32px;
+  --radius-card: 20px;
 }
 
 html {
@@ -214,20 +228,24 @@ h3 {
   font-variant-numeric: tabular-nums;
 }
 
-/* Display type: tight, optically aligned, never letter-spaced by default. */
+/* Display type: Bricolage carries the warmth the interface deliberately does
+   not — the numbers stay in mono, the headlines get to be friendly. */
 .display {
-  letter-spacing: -0.035em;
-  line-height: 1.02;
-  font-weight: 500;
+  font-family: var(--font-bricolage), var(--font-geist-sans), sans-serif;
+  letter-spacing: -0.025em;
+  line-height: 1.04;
+  font-weight: 600;
   text-wrap: balance;
 }
 
+/* A section's name, in sentence case. It used to be tracked-out uppercase
+   mono, which made every heading on the site look like a readout — mono is
+   reserved for values the machine measured, and a heading is not one. */
 .eyebrow {
-  font-family: var(--font-mono), ui-monospace, monospace;
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--signal);
 }
 
 /* A hairline that fades out at both ends, for section breaks. */

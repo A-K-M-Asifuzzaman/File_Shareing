@@ -98,37 +98,41 @@ export default function SendPage() {
     <>
       <PageDrop onFiles={add} disabled={Boolean(snap)} />
 
-      {/* The field reads the real transfer: it accelerates while bytes move
-          and the corridor fills as progress does. */}
-      <section className="relative isolate overflow-hidden border-b border-line">
-        <div className="absolute inset-0 -z-10 bg-ground-deep" />
-        <Field
-          intensity={active ? 1 : live ? 0.45 : 0.12}
-          progress={snap?.progress.fraction ?? 0}
-          className="-z-10 opacity-90"
-        />
+      {/* One filled surface, and everything on it belongs to the transfer. The
+          field reads the real thing: it accelerates while bytes move and the
+          corridor fills as progress does. */}
+      <section className="mx-auto w-full max-w-6xl px-4 pt-6 sm:px-5 sm:pt-8">
+        <div className="relative isolate overflow-hidden rounded-[var(--radius-panel)] bg-signal">
+          <Field
+            intensity={active ? 1 : live ? 0.45 : 0.12}
+            progress={snap?.progress.fraction ?? 0}
+            className="-z-10 opacity-25 mix-blend-soft-light"
+          />
 
-        <div className="mx-auto w-full max-w-6xl px-5 pt-16 pb-20 sm:pt-24 sm:pb-28">
-          {snap ? (
-            <div className="mx-auto w-full max-w-xl">
-              <SenderView
-                snap={snap}
-                onReset={reset}
-                onPause={() => senderRef.current?.pause()}
-                onResume={() => senderRef.current?.resume()}
+          {/* A running transfer gets its own white card, like the drop zone it
+              replaces: the readouts are ink on paper, not on the fill. */}
+          <div className="px-6 py-14 sm:px-12 sm:py-20">
+            {snap ? (
+              <div className="mx-auto w-full max-w-xl rounded-[var(--radius-card)] bg-panel p-6 shadow-[var(--shadow-lift)] sm:p-8">
+                <SenderView
+                  snap={snap}
+                  onReset={reset}
+                  onPause={() => senderRef.current?.pause()}
+                  onResume={() => senderRef.current?.resume()}
+                />
+              </div>
+            ) : (
+              <Hero
+                staged={staged}
+                note={note}
+                setNote={setNote}
+                onAdd={add}
+                onRemove={(id) => setStaged((prev) => prev.filter((p) => key(p) !== id))}
+                onClear={() => setStaged([])}
+                onSend={() => void begin(staged, note)}
               />
-            </div>
-          ) : (
-            <Hero
-              staged={staged}
-              note={note}
-              setNote={setNote}
-              onAdd={add}
-              onRemove={(id) => setStaged((prev) => prev.filter((p) => key(p) !== id))}
-              onClear={() => setStaged([])}
-              onSend={() => void begin(staged, note)}
-            />
-          )}
+            )}
+          </div>
         </div>
       </section>
 
@@ -260,51 +264,51 @@ function Hero({
   const over = total > MAX_TRANSFER_BYTES;
 
   return (
-    <div className="grid items-center gap-12 lg:grid-cols-[1.05fr_0.95fr] lg:gap-16">
+    <div className="grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:gap-16">
       <div className="rise">
-        <p className="eyebrow">Peer to peer · nothing stored</p>
-
-        <h1 className="display mt-5 text-[40px] sm:text-[56px] lg:text-[64px]">
-          Send files straight
-          <br />
-          to someone else&rsquo;s
-          <br />
-          <span className="text-signal">device.</span>
+        <h1 className="display text-[40px] text-signal-ink sm:text-[54px] lg:text-[60px]">
+          Send a file straight to someone else&rsquo;s device
         </h1>
 
-        <p className="mt-6 max-w-md text-[16px] leading-relaxed text-ink-soft">
-          Choose files or a whole folder and you get one link. Open it on the other side and the
-          bytes travel directly between the two browsers, encrypted, with no copy left on a
-          server.
+        <p className="mt-6 max-w-md text-[17px] leading-relaxed text-signal-ink-soft">
+          You get one link. They open it, and the bytes go from your device to theirs — encrypted,
+          and with no copy left on a server along the way.
         </p>
 
-        <dl className="mt-9 grid max-w-md grid-cols-3 gap-4">
+        <dl className="mt-10 grid max-w-md grid-cols-3 gap-6 border-t border-signal-edge pt-6">
           {[
-            ["100 GB", "per transfer"],
-            ["0 bytes", "kept by us"],
-            ["SHA-256", "every file"],
+            ["100 GB", "in one transfer"],
+            ["Nothing", "kept on a server"],
+            ["Every file", "checked on arrival"],
           ].map(([big, small]) => (
             <div key={big} className="flex flex-col gap-1">
-              <dt className="tabular text-[17px] text-ink">{big}</dt>
-              <dd className="text-[12px] text-ink-faint">{small}</dd>
+              <dt className="text-[16px] font-medium text-signal-ink">{big}</dt>
+              <dd className="text-[12.5px] leading-snug text-signal-ink-soft">{small}</dd>
             </div>
           ))}
         </dl>
       </div>
 
-      <div className="glass rise relative rounded-2xl border border-line p-6 shadow-[var(--shadow-lift)] sm:p-8" style={{ animationDelay: "120ms" }}>
+      {/* The brightest object on the page is the one you are meant to use. */}
+      <div
+        className="rise relative rounded-[var(--radius-card)] bg-panel p-6 shadow-[var(--shadow-lift)] sm:p-8"
+        style={{ animationDelay: "120ms" }}
+      >
         {staged.length === 0 ? (
           <>
             <Endpoints phase="idle" />
-            <div className="mt-7 flex flex-col items-center gap-3">
+            <p className="mt-7 text-center text-[19px] font-medium tracking-tight">
+              Drop your files here
+            </p>
+            <div className="mt-5 flex flex-col items-center gap-3">
               <PickButtons fileInput={fileInput} folderInput={folderInput} />
               <p className="text-[13px] text-ink-faint">
-                or drop them anywhere on this page · up to {formatBytes(MAX_TRANSFER_BYTES)}
+                Anywhere on this page works. Up to {formatBytes(MAX_TRANSFER_BYTES)} at a time.
               </p>
             </div>
-            <p className="mt-7 border-t border-line pt-5 text-[12px] leading-relaxed text-ink-faint">
-              Keep this tab open while it transfers — the files are read from this device as they
-              send, so there is nothing to delete afterwards.
+            <p className="mt-7 border-t border-line pt-5 text-[12.5px] leading-relaxed text-ink-faint">
+              Keep this tab open while it sends. The files are read from this device as they go,
+              so there is nothing to delete afterwards.
             </p>
           </>
         ) : (
@@ -408,14 +412,14 @@ function PickButtons({
       <button
         type="button"
         onClick={() => fileInput.current?.click()}
-        className="flex-1 rounded-xl bg-signal px-6 py-4 text-[15px] font-medium text-signal-ink transition-transform duration-200 hover:scale-[1.02] active:scale-[0.99]"
+        className="flex-1 rounded-full bg-signal px-6 py-4 text-[15px] font-medium text-signal-ink transition-transform duration-200 hover:scale-[1.02] active:scale-[0.99]"
       >
         Choose files
       </button>
       <button
         type="button"
         onClick={() => folderInput.current?.click()}
-        className="rounded-xl border border-line px-5 py-4 text-[15px] transition-colors duration-200 hover:border-line-strong hover:bg-ground-deep"
+        className="rounded-full border border-line px-6 py-4 text-[15px] transition-colors duration-200 hover:border-line-strong hover:bg-ground-deep"
       >
         A folder
       </button>

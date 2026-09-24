@@ -29,4 +29,9 @@ apps/mobile/.flutter-plugins-dependencies
 apps/mobile/*.iml
 apps/mobile/android/.gradle/
 apps/mobile/android/local.properties
+
+# Release signing. Never in the repo, on any account.
+apps/mobile/android/key.properties
+*.jks
+*.keystore
 apps/mobile/flutter_*.log
