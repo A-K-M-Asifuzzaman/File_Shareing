@@ -2,6 +2,7 @@ import 'package:direct_protocol/direct_protocol.dart';
 import 'dart:async';
 import 'dart:io';
 
+import 'package:app_links/app_links.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -79,10 +80,19 @@ class _HomePageState extends State<HomePage> {
   /// One history entry per transfer, written the moment it settles.
   bool _logged = false;
 
+  /// Share links arriving as intents — the manifest claims /t/ URLs on the
+  /// web client's host, so tapping one in a chat app lands here.
+  StreamSubscription<Uri>? _links;
+
   @override
   void initState() {
     super.initState();
     unawaited(TransferService.requestPermissions());
+
+    // The stream replays the link the app was launched with, so this covers
+    // both a cold start from a tapped link and one arriving while the app is
+    // already open.
+    _links = AppLinks().uriLinkStream.listen(_followLink);
 
     // Start waking the signaling service now, so its cold start overlaps with
     // choosing a file rather than landing on the user afterwards.
@@ -91,6 +101,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    unawaited(_links?.cancel());
     _sender?.cancel();
     _receiver?.cancel();
     _noteController.dispose();
@@ -249,6 +260,19 @@ class _HomePageState extends State<HomePage> {
   }
 
   /* -------------------------------------------------------------- receive */
+
+  /// A share link tapped somewhere else on the phone.
+  ///
+  /// Refused while something is already in flight: silently replacing a live
+  /// transfer with a new one loses the first without saying so.
+  void _followLink(Uri uri) {
+    if (_sender != null || _receiver != null) {
+      _toast('Finish or cancel the current transfer before opening another.');
+      return;
+    }
+    _linkController.text = uri.toString();
+    unawaited(_openLink());
+  }
 
   Future<void> _openLink() async {
     final parsed = parseShareUrl(_linkController.text);

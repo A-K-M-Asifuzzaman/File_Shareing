@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Palette._darkBase.ground. A white launch window on this palette is the
+         flash the whole theme system exists to avoid. -->
+    <color name="ground">#08090B</color>
+</resources>

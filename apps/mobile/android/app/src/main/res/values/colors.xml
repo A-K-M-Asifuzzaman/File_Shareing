@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The icon keeps its own ground in every scheme: a launcher icon that
+         changed colour with dark mode would stop being recognisable. -->
+    <color name="ic_launcher_background">#0B0C0E</color>
+
+    <!-- The window behind the app while the engine starts. It has to be the
+         colour the first frame will paint, or launching the app flashes the
+         wrong scheme — the same reason the web client sets its theme in an
+         inline script before paint. This is Palette._lightBase.ground. -->
+    <color name="ground">#F6F5F2</color>
+</resources>

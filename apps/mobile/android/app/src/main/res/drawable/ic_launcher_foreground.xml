@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The same mark the web client draws in its header and its favicon: a sender,
+  a dotted path, a receiver. Kept as a vector so one file covers every density.
+
+  Drawn on the 108dp adaptive canvas, with the content inside the central 66dp
+  the launcher is allowed to mask to. Vector drawables have no stroke-dasharray,
+  so the dotted path is three round-capped zero-length strokes.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- The sender: solid, because it holds the bytes. -->
+    <path
+        android:fillColor="#F1F2F0"
+        android:pathData="M36.4,46.3 A7.7,7.7 0 1,1 36.4,61.7 A7.7,7.7 0 1,1 36.4,46.3 Z" />
+
+    <!-- The path between them, in the signal colour. -->
+    <path
+        android:pathData="M48.5,54 L48.5,54"
+        android:strokeColor="#C8F04C"
+        android:strokeWidth="5.5"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M54,54 L54,54"
+        android:strokeColor="#C8F04C"
+        android:strokeWidth="5.5"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M59.5,54 L59.5,54"
+        android:strokeColor="#C8F04C"
+        android:strokeWidth="5.5"
+        android:strokeLineCap="round" />
+
+    <!-- The receiver: an outline, because it is still empty. -->
+    <path
+        android:pathData="M71.6,46.3 A7.7,7.7 0 1,1 71.6,61.7 A7.7,7.7 0 1,1 71.6,46.3 Z"
+        android:strokeColor="#C8F04C"
+        android:strokeWidth="5.5" />
+</vector>

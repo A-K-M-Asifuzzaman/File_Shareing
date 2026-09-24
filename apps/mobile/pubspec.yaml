@@ -1,7 +1,7 @@
 name: direct_transfer
 description: Peer-to-peer file transfer. Bytes go device to device; nothing is stored.
 publish_to: "none"
-version: 0.1.0+1
+version: 0.2.0+4
 
 environment:
   sdk: ^3.12.0
@@ -37,6 +37,12 @@ dependencies:
   # Keeps the transfer running while the app is backgrounded. This is the
   # capability the web client cannot have.
   flutter_foreground_task: ^8.17.0
+
+  # The share link tapped in a chat app arrives here as an intent. Doing this
+  # by hand means a platform channel plus the cold-start race between the
+  # intent landing and the Flutter engine being ready to hear about it, which
+  # is exactly what this package already gets right.
+  app_links: ^6.3.2
 
 dev_dependencies:
   flutter_test:

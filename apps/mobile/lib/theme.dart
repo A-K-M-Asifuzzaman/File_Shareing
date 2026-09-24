@@ -265,12 +265,15 @@ ThemeData buildTheme(Brightness brightness, Accent accent) {
       contentTextStyle: TextStyle(color: p.ink, fontSize: 13.5),
       behavior: SnackBarBehavior.floating,
     ),
+    // Pills, matching the web client's primary actions. A fully rounded button
+    // reads as "press me" at arm's length in a way a 14px radius does not, and
+    // the two clients are meant to look like one product.
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
         backgroundColor: p.signal,
         foregroundColor: p.signalInk,
         minimumSize: const Size.fromHeight(54),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        shape: const StadiumBorder(),
         textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
       ),
     ),
@@ -279,7 +282,7 @@ ThemeData buildTheme(Brightness brightness, Accent accent) {
         foregroundColor: p.ink,
         side: BorderSide(color: p.line),
         minimumSize: const Size.fromHeight(54),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        shape: const StadiumBorder(),
         textStyle: const TextStyle(fontSize: 16),
       ),
     ),
