@@ -516,18 +516,50 @@ export class FileReceiver {
     });
   }
 
+  /**
+   * Wait for the declared bytes to finish arriving.
+   *
+   * Bounded by silence rather than by a total time: how long the rest of a
+   * file takes is a property of the link and unknowable here, while "nothing
+   * has arrived for ten seconds" means the same on every link — there is no
+   * tail still coming, and the transfer really is short.
+   */
+  private async awaitTail(totalBytes: bigint): Promise<void> {
+    const step = 100;
+    const patience = 100; // ten seconds of silence
+
+    let seen = this.received;
+    let idle = 0;
+    while (!this.aborted && this.received < totalBytes && idle < patience) {
+      await new Promise((r) => setTimeout(r, step));
+      if (this.received !== seen) {
+        seen = this.received;
+        idle = 0;
+      } else {
+        idle++;
+      }
+    }
+  }
+
   private async finish(): Promise<void> {
     if (this.aborted || this.verified) return;
     this.emit("verifying");
 
-    // TRANSFER_COMPLETE can arrive while the last chunks are still being
-    // written, so let the queue drain before deciding the batch is short.
+    const manifest = this.manifest;
+    if (!manifest) return;
+
+    // The tail of the transfer may still be on the wire. TRANSFER_COMPLETE
+    // rides the control channel, and SCTP orders each stream independently, so
+    // a small control message overtakes megabytes already queued on the data
+    // channel whenever the link is slow enough to have a queue — a relayed
+    // transfer to a phone, say. With both peers local, as in the e2e suite,
+    // there is never a queue and this never shows.
+    await this.awaitTail(manifest.totalBytes);
+
+    // And the last chunks may still be queued behind the disk.
     await this.writes.catch(() => undefined);
 
     if (this.aborted) return;
-
-    const manifest = this.manifest;
-    if (!manifest) return;
 
     // A short transfer that claims completion is a failure, not a success.
     if (this.received !== manifest.totalBytes) {

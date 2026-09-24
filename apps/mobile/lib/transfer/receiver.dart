@@ -523,16 +523,47 @@ class FileReceiver {
     return _digests[fileId];
   }
 
+  /// Wait for the declared bytes to finish arriving.
+  ///
+  /// Bounded by silence rather than by a total time, because "how long the
+  /// rest of this file takes" is a property of the link and unknowable here,
+  /// while "nothing has arrived for ten seconds" means the same thing on every
+  /// link: there is no tail still coming, and the transfer really is short.
+  Future<void> _awaitTail(int totalBytes) async {
+    const step = Duration(milliseconds: 100);
+    const patience = 100; // ten seconds of silence
+
+    var seen = _received;
+    var idle = 0;
+    while (!_aborted && _received < totalBytes && idle < patience) {
+      await Future<void>.delayed(step);
+      if (_received != seen) {
+        seen = _received;
+        idle = 0;
+      } else {
+        idle++;
+      }
+    }
+  }
+
   Future<void> _finish() async {
     if (_aborted || _verified) return;
     _emit(TransferState.verifying);
 
-    // The last chunks may still be queued behind the disk.
-    await _writes.catchError((_) {});
-    if (_aborted) return;
-
     final manifest = _manifest;
     if (manifest == null) return;
+
+    // The tail of the transfer may still be on the wire. TRANSFER_COMPLETE
+    // rides the control channel, and SCTP orders each stream independently, so
+    // a small control message overtakes megabytes already queued on the data
+    // channel whenever the link is slow enough to have a queue — a relayed
+    // transfer to a phone, say. Both peers local, as in the e2e suite, there is
+    // never a queue and this never shows.
+    await _awaitTail(manifest.totalBytes);
+
+    // And the last chunks may still be queued behind the disk.
+    await _writes.catchError((_) {});
+    if (_aborted) return;
 
     if (_received != manifest.totalBytes) {
       sendControl(_control, {
